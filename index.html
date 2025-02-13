@@ -3,15 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Running Tracker</title>
-    <link rel="stylesheet" href="styles.css">
+    <title>Live Running Tracker</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        #map { height: 500px; width: 100%; }
+    </style>
 </head>
 <body>
-    <h1>Running Tracker</h1>
-    <button id="start">Start Run</button>
-    <button id="stop" disabled>Stop Run</button>
+    <h2>Live Running Tracker</h2>
+    <div id="map"></div>
     <p>Distance: <span id="distance">0</span> meters</p>
     <p>Time Elapsed: <span id="time">0:00</span></p>
+    <button id="start">Start Run</button>
+    <button id="stop" disabled>Stop Run</button>
+
     <script src="script.js"></script>
 </body>
 </html>

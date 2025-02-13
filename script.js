@@ -1,39 +1,66 @@
+let map, userMarker, pathLine;
 let watchId;
 let totalDistance = 0;
 let prevPosition = null;
-let nextMilestone = 1000; // 1 km
-let startTime;
-let lastMilestoneTime;
+let nextMilestone = 1000;
+let startTime, lastMilestoneTime;
+let pathCoordinates = [];
+let timerInterval;
+
+function initMap() {
+    map = L.map("map").setView([25.276987, 55.296249], 15); // Default: Dubai
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(map);
+
+    userMarker = L.marker([25.276987, 55.296249]).addTo(map).bindPopup("You").openPopup();
+    pathLine = L.polyline([], { color: "red", weight: 4 }).addTo(map);
+
+    // 📌 Fix: Ensure map resizes properly on mobile
+    setTimeout(() => {
+        map.invalidateSize();
+    }, 500);
+}
 
 document.getElementById("start").addEventListener("click", () => {
     totalDistance = 0;
     prevPosition = null;
-    nextMilestone = 1000; // Reset milestone tracking
+    nextMilestone = 1000;
     startTime = Date.now();
     lastMilestoneTime = startTime;
-    document.getElementById("distance").textContent = totalDistance;
+    pathCoordinates = [];
+
+    document.getElementById("distance").textContent = "0";
     document.getElementById("time").textContent = "0:00";
 
-    // Start timer
-    updateTimer();
-    
+    updateTimer(); // Start timer
+
     watchId = navigator.geolocation.watchPosition(position => {
         const { latitude, longitude } = position.coords;
 
         if (prevPosition) {
-            const dist = getDistanceFromLatLon(prevPosition.lat, prevPosition.lon, latitude, longitude);
+            const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
             totalDistance += dist;
             document.getElementById("distance").textContent = totalDistance.toFixed(2);
 
-            // Check if we hit the next milestone
+            // Update path
+            pathCoordinates.push([latitude, longitude]);
+            pathLine.setLatLngs(pathCoordinates);
+
+            // Update marker
+            userMarker.setLatLng([latitude, longitude]);
+            map.setView([latitude, longitude]);
+
+            // Announce milestones
             if (totalDistance >= nextMilestone) {
                 let now = Date.now();
-                let timeTaken = ((now - lastMilestoneTime) / 1000).toFixed(0); // Seconds
+                let timeTaken = ((now - lastMilestoneTime) / 1000).toFixed(0);
                 let timeFormatted = formatTime(timeTaken);
                 speakText(`You've completed ${nextMilestone / 1000} kilometer in ${timeFormatted}.`);
                 
-                nextMilestone += 1000; // Set next milestone
-                lastMilestoneTime = now; // Update milestone time
+                nextMilestone += 1000;
+                lastMilestoneTime = now;
             }
         }
 
@@ -46,26 +73,30 @@ document.getElementById("start").addEventListener("click", () => {
 
 document.getElementById("stop").addEventListener("click", () => {
     navigator.geolocation.clearWatch(watchId);
+
+    // Reset timer to 0
+    clearInterval(timerInterval);
+    document.getElementById("time").textContent = "0:00";
+
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
 });
-
-// ⏳ Update Timer
-function updateTimer() {
-    if (!startTime) return;
-    let now = Date.now();
-    let elapsed = ((now - startTime) / 1000).toFixed(0); // Seconds
-    document.getElementById("time").textContent = formatTime(elapsed);
-
-    // Keep updating every second
-    setTimeout(updateTimer, 1000);
-}
 
 // 🔊 Speak Function
 function speakText(text) {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
     speechSynthesis.speak(utterance);
+}
+
+// ⏱️ Timer Function
+function updateTimer() {
+    clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+        let now = Date.now();
+        let elapsed = ((now - startTime) / 1000).toFixed(0);
+        document.getElementById("time").textContent = formatTime(elapsed);
+    }, 1000);
 }
 
 // ⏱️ Format Time (MM:SS)
@@ -76,13 +107,17 @@ function formatTime(seconds) {
 }
 
 // 📏 Distance Calculation (Haversine formula)
-function getDistanceFromLatLon(lat1, lon1, lat2, lon2) {
-    const R = 6371000; // Radius of Earth in meters
+function getDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
     const dLat = (lat2 - lat1) * (Math.PI / 180);
     const dLon = (lon2 - lon1) * (Math.PI / 180);
     const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
               Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * 
               Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c; // Distance in meters
+    return R * c;
 }
+
+// 🔥 Initialize map on load
+initMap();
+
