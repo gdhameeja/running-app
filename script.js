@@ -8,6 +8,13 @@ let pathCoordinates = [];
 let timerInterval;
 let elapsedTime = 0; // Add elapsed time variable
 
+// Kalman Filter parameters
+let kalmanLat, kalmanLon;
+let Q = 0.00001; // Process noise covariance
+let R = 0.001;   // Measurement noise covariance
+let P = 1;       // Estimation error covariance
+let latState, lonState;
+
 function initMap() {
     map = L.map("map").setView([25.276987, 55.296249], 15); // Default: Dubai
 
@@ -22,6 +29,14 @@ function initMap() {
     setTimeout(() => {
         map.invalidateSize();
     }, 500);
+}
+
+// Kalman Filter Update Function
+function kalmanUpdate(measurement, state, Q, R, P) {
+    let K = P / (P + R);
+    state = state + K * (measurement - state);
+    P = (1 - K) * P + Q;
+    return { state: state, P: P };
 }
 
 document.getElementById("start").addEventListener("click", () => {
@@ -39,22 +54,38 @@ document.getElementById("start").addEventListener("click", () => {
     clearInterval(timerInterval); // Clear any existing timer
     updateTimer(); // Start timer
 
+     // Initialize Kalman filter states
+     kalmanLat = { state: 0, P: 1 };
+     kalmanLon = { state: 0, P: 1 };
+
     watchId = navigator.geolocation.watchPosition(position => {
         const { latitude, longitude } = position.coords;
 
+        // Kalman Filter Estimation
+        let latEstimate = kalmanUpdate(latitude, kalmanLat.state, Q, R, kalmanLat.P);
+        let lonEstimate = kalmanUpdate(longitude, kalmanLon.state, Q, R, kalmanLon.P);
+
+        kalmanLat.state = latEstimate.state;
+        kalmanLat.P = latEstimate.P;
+        kalmanLon.state = lonEstimate.state;
+        kalmanLon.P = lonEstimate.P;
+
+        const smoothedLatitude = kalmanLat.state;
+        const smoothedLongitude = kalmanLon.state;
+
         if (prevPosition) {
-            const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
+            const dist = getDistance(prevPosition.lat, prevPosition.lon, smoothedLatitude, smoothedLongitude);
             totalDistance += dist;
             const distanceInKilometers = (totalDistance / 1000).toFixed(2);
             document.getElementById("distance").textContent = `${distanceInKilometers} kms`;
 
             // Update path
-            pathCoordinates.push([latitude, longitude]);
+            pathCoordinates.push([smoothedLatitude, smoothedLongitude]);
             pathLine.setLatLngs(pathCoordinates);
 
             // Update marker
-            userMarker.setLatLng([latitude, longitude]);
-            map.setView([latitude, longitude]);
+            userMarker.setLatLng([smoothedLatitude, smoothedLongitude]);
+            map.setView([smoothedLatitude, smoothedLongitude]);
 
             // Announce milestones
             if (totalDistance >= nextMilestone) {
@@ -68,7 +99,7 @@ document.getElementById("start").addEventListener("click", () => {
             }
         }
 
-        prevPosition = { lat: latitude, lon: longitude };
+        prevPosition = { lat: smoothedLatitude, lon: smoothedLongitude };
     });
 
     document.getElementById("start").disabled = true;
