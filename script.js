@@ -1,3 +1,25 @@
+class KalmanFilter {
+    constructor(processNoise = 1, measurementNoise = 1, estimateError = 1, initialEstimate = 0) {
+        this.processNoise = processNoise;
+        this.measurementNoise = measurementNoise;
+        this.estimateError = estimateError;
+        this.estimate = initialEstimate;
+        this.kalmanGain = 0;
+    }
+
+    update(measurement) {
+        // Prediction update
+        this.estimateError += this.processNoise;
+        
+        // Measurement update
+        this.kalmanGain = this.estimateError / (this.estimateError + this.measurementNoise);
+        this.estimate += this.kalmanGain * (measurement - this.estimate);
+        this.estimateError *= (1 - this.kalmanGain);
+
+        return this.estimate;
+    }
+}
+
 let map, userMarker, pathLine;
 let watchId;
 let totalDistance = 0;
@@ -6,10 +28,14 @@ let nextMilestone = 1000;
 let startTime, lastMilestoneTime;
 let pathCoordinates = [];
 let timerInterval;
-let elapsedTime = 0; // Add elapsed time variable
+let elapsedTime = 0;
+
+// Kalman filters for latitude and longitude
+const kalmanLat = new KalmanFilter(0.0001, 0.0005, 1, 25.276987);
+const kalmanLon = new KalmanFilter(0.0001, 0.0005, 1, 55.296249);
 
 function initMap() {
-    map = L.map("map").setView([25.276987, 55.296249], 15); // Default: Dubai
+    map = L.map("map").setView([25.276987, 55.296249], 15);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap contributors",
@@ -18,7 +44,6 @@ function initMap() {
     userMarker = L.marker([25.276987, 55.296249]).addTo(map).bindPopup("You").openPopup();
     pathLine = L.polyline([], { color: "red", weight: 4 }).addTo(map);
 
-    // 📌 Fix: Ensure map resizes properly on mobile
     setTimeout(() => {
         map.invalidateSize();
     }, 500);
@@ -31,32 +56,32 @@ document.getElementById("start").addEventListener("click", () => {
     startTime = Date.now();
     lastMilestoneTime = startTime;
     pathCoordinates = [];
-    elapsedTime = 0; // Reset elapsed time to 0
+    elapsedTime = 0;
 
     document.getElementById("distance").textContent = "0.00 kms";
     document.getElementById("time").textContent = "0:00";
 
-    clearInterval(timerInterval); // Clear any existing timer
-    updateTimer(); // Start timer
+    clearInterval(timerInterval);
+    updateTimer();
 
     watchId = navigator.geolocation.watchPosition(position => {
-        const { latitude, longitude } = position.coords;
+        let { latitude, longitude } = position.coords;
+
+        // Apply Kalman filter
+        latitude = kalmanLat.update(latitude);
+        longitude = kalmanLon.update(longitude);
 
         if (prevPosition) {
             const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
             totalDistance += dist;
-            const distanceInKilometers = (totalDistance / 1000).toFixed(2);
-            document.getElementById("distance").textContent = `${distanceInKilometers} kms`;
+            document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
 
-            // Update path
             pathCoordinates.push([latitude, longitude]);
             pathLine.setLatLngs(pathCoordinates);
 
-            // Update marker
             userMarker.setLatLng([latitude, longitude]);
             map.setView([latitude, longitude]);
 
-            // Announce milestones
             if (totalDistance >= nextMilestone) {
                 let now = Date.now();
                 let timeTaken = ((now - lastMilestoneTime) / 1000).toFixed(0);
@@ -67,7 +92,6 @@ document.getElementById("start").addEventListener("click", () => {
                 lastMilestoneTime = now;
             }
         }
-
         prevPosition = { lat: latitude, lon: longitude };
     });
 
@@ -77,39 +101,31 @@ document.getElementById("start").addEventListener("click", () => {
 
 document.getElementById("stop").addEventListener("click", () => {
     navigator.geolocation.clearWatch(watchId);
-
-    clearInterval(timerInterval); // Clear the timer interval
-
+    clearInterval(timerInterval);
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
 });
 
-// 🔊 Speak Function
 function speakText(text) {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
     speechSynthesis.speak(utterance);
 }
 
-// ⏱️ Timer Function
 function updateTimer() {
-    clearInterval(timerInterval); // Clear existing interval to prevent duplicates
+    clearInterval(timerInterval);
     timerInterval = setInterval(() => {
-        let now = Date.now();
-        let currentElapsed = ((now - startTime) / 1000);
-        elapsedTime = currentElapsed; // Update elapsed time
+        elapsedTime = ((Date.now() - startTime) / 1000);
         document.getElementById("time").textContent = formatTime(Math.floor(elapsedTime));
     }, 1000);
 }
 
-// ⏱️ Format Time (MM:SS)
 function formatTime(seconds) {
     let mins = Math.floor(seconds / 60);
     let secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-// 📏 Distance Calculation (Haversine formula)
 function getDistance(lat1, lon1, lat2, lon2) {
     const R = 6371000;
     const dLat = (lat2 - lat1) * (Math.PI / 180);
@@ -121,6 +137,4 @@ function getDistance(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-// 🔥 Initialize map on load
 initMap();
-
