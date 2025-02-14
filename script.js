@@ -6,6 +6,7 @@ let nextMilestone = 1000;
 let startTime, lastMilestoneTime;
 let pathCoordinates = [];
 let timerInterval;
+let elapsedTime = 0; // Add elapsed time variable
 
 function initMap() {
     map = L.map("map").setView([25.276987, 55.296249], 15); // Default: Dubai
@@ -30,10 +31,12 @@ document.getElementById("start").addEventListener("click", () => {
     startTime = Date.now();
     lastMilestoneTime = startTime;
     pathCoordinates = [];
+    elapsedTime = 0; // Reset elapsed time to 0
 
-    document.getElementById("distance").textContent = "0";
+    document.getElementById("distance").textContent = "0.00 kms";
     document.getElementById("time").textContent = "0:00";
 
+    clearInterval(timerInterval); // Clear any existing timer
     updateTimer(); // Start timer
 
     watchId = navigator.geolocation.watchPosition(position => {
@@ -42,7 +45,8 @@ document.getElementById("start").addEventListener("click", () => {
         if (prevPosition) {
             const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
             totalDistance += dist;
-            document.getElementById("distance").textContent = totalDistance.toFixed(2);
+            const distanceInKilometers = (totalDistance / 1000).toFixed(2);
+            document.getElementById("distance").textContent = `${distanceInKilometers} kms`;
 
             // Update path
             pathCoordinates.push([latitude, longitude]);
@@ -74,9 +78,7 @@ document.getElementById("start").addEventListener("click", () => {
 document.getElementById("stop").addEventListener("click", () => {
     navigator.geolocation.clearWatch(watchId);
 
-    // Reset timer to 0
-    clearInterval(timerInterval);
-    document.getElementById("time").textContent = "0:00";
+    clearInterval(timerInterval); // Clear the timer interval
 
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
@@ -91,11 +93,12 @@ function speakText(text) {
 
 // ⏱️ Timer Function
 function updateTimer() {
-    clearInterval(timerInterval);
+    clearInterval(timerInterval); // Clear existing interval to prevent duplicates
     timerInterval = setInterval(() => {
         let now = Date.now();
-        let elapsed = ((now - startTime) / 1000).toFixed(0);
-        document.getElementById("time").textContent = formatTime(elapsed);
+        let currentElapsed = ((now - startTime) / 1000);
+        elapsedTime = currentElapsed; // Update elapsed time
+        document.getElementById("time").textContent = formatTime(Math.floor(elapsedTime));
     }, 1000);
 }
 
