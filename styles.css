@@ -44,7 +44,8 @@ button {
     color: white;
     cursor: pointer;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
-    transition: background-color 0.3s ease;
+    transition: all 0.3s ease;
+    min-width: 100px;
 }
 
 button:hover {
@@ -55,6 +56,18 @@ button:disabled {
     background-color: #9fa8da; /* Lighter shade when disabled */
     cursor: not-allowed;
     box-shadow: none;
+}
+
+#pause {
+    background-color: #ff9800;
+}
+
+#pause:hover {
+    background-color: #f57c00;
+}
+
+#pause:disabled {
+    background-color: #ffcc80;
 }
 
 /* Add more styles as needed */

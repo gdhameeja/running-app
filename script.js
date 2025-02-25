@@ -29,6 +29,8 @@ let startTime, lastMilestoneTime;
 let pathCoordinates = [];
 let timerInterval;
 let elapsedTime = 0;
+let isPaused = false;
+let pausedTime = 0;
 
 // Kalman filters for latitude and longitude
 const kalmanLat = new KalmanFilter(0.0001, 0.0005, 1, 25.276987);
@@ -57,6 +59,8 @@ document.getElementById("start").addEventListener("click", () => {
     lastMilestoneTime = startTime;
     pathCoordinates = [];
     elapsedTime = 0;
+    isPaused = false;
+    pausedTime = 0;
 
     document.getElementById("distance").textContent = "0.00 kms";
     document.getElementById("time").textContent = "0:00";
@@ -65,39 +69,31 @@ document.getElementById("start").addEventListener("click", () => {
     clearInterval(timerInterval);
     updateTimer();
 
-    watchId = navigator.geolocation.watchPosition(position => {
-        let { latitude, longitude } = position.coords;
-
-        // Apply Kalman filter
-        latitude = kalmanLat.update(latitude);
-        longitude = kalmanLon.update(longitude);
-
-        if (prevPosition) {
-            const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
-            totalDistance += dist;
-            document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
-
-            pathCoordinates.push([latitude, longitude]);
-            pathLine.setLatLngs(pathCoordinates);
-
-            userMarker.setLatLng([latitude, longitude]);
-            map.setView([latitude, longitude]);
-
-            if (totalDistance >= nextMilestone) {
-                let now = Date.now();
-                let timeTaken = ((now - lastMilestoneTime) / 1000).toFixed(0);
-                let timeFormatted = formatTime(timeTaken);
-                speakText(`You've completed ${nextMilestone / 1000} kilometer in ${timeFormatted}.`);
-                
-                nextMilestone += 1000;
-                lastMilestoneTime = now;
-            }
-        }
-        prevPosition = { lat: latitude, lon: longitude };
-    });
+    watchId = startTracking();
 
     document.getElementById("start").disabled = true;
     document.getElementById("stop").disabled = false;
+    document.getElementById("pause").disabled = false;
+});
+
+document.getElementById("pause").addEventListener("click", () => {
+    const pauseButton = document.getElementById("pause");
+    if (!isPaused) {
+        // Pause functionality
+        navigator.geolocation.clearWatch(watchId);
+        clearInterval(timerInterval);
+        pausedTime = Date.now();
+        isPaused = true;
+        pauseButton.textContent = "Resume";
+    } else {
+        // Resume functionality
+        startTime += (Date.now() - pausedTime);
+        lastMilestoneTime += (Date.now() - pausedTime);
+        updateTimer();
+        watchId = startTracking();
+        isPaused = false;
+        pauseButton.textContent = "Pause";
+    }
 });
 
 document.getElementById("stop").addEventListener("click", () => {
@@ -105,6 +101,9 @@ document.getElementById("stop").addEventListener("click", () => {
     clearInterval(timerInterval);
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
+    document.getElementById("pause").disabled = true;
+    document.getElementById("pause").textContent = "Pause";
+    isPaused = false;
 });
 
 function speakText(text) {
@@ -142,6 +141,39 @@ function getDistance(lat1, lon1, lat2, lon2) {
               Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
+}
+
+function startTracking() {
+    return navigator.geolocation.watchPosition(position => {
+        let { latitude, longitude } = position.coords;
+        
+        // Apply Kalman filter
+        latitude = kalmanLat.update(latitude);
+        longitude = kalmanLon.update(longitude);
+
+        if (prevPosition) {
+            const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
+            totalDistance += dist;
+            document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
+
+            pathCoordinates.push([latitude, longitude]);
+            pathLine.setLatLngs(pathCoordinates);
+
+            userMarker.setLatLng([latitude, longitude]);
+            map.setView([latitude, longitude]);
+
+            if (totalDistance >= nextMilestone) {
+                let now = Date.now();
+                let timeTaken = ((now - lastMilestoneTime) / 1000).toFixed(0);
+                let timeFormatted = formatTime(timeTaken);
+                speakText(`You've completed ${nextMilestone / 1000} kilometer in ${timeFormatted}.`);
+                
+                nextMilestone += 1000;
+                lastMilestoneTime = now;
+            }
+        }
+        prevPosition = { lat: latitude, lon: longitude };
+    });
 }
 
 initMap();
