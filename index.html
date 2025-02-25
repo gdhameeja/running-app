@@ -20,9 +20,29 @@
         <p>Distance: <span id="distance">0.00 kms</span></p>
         <p>Time Elapsed: <span id="time">0:00</span></p>
         <p>Average Pace: <span id="pace">0:00 /km</span></p>
-        <button id="start">Start Run</button>
-        <button id="pause" disabled>Pause</button>
-        <button id="stop" disabled>Stop Run</button>
+        <button id="start"><span class="material-icons">play_arrow</span></button>
+        <button id="pause" disabled><span class="material-icons">pause</span></button>
+        <button id="stop" disabled><span class="material-icons">stop</span></button>
+        <!-- New button for previous runs -->
+        <button id="showPreviousRuns">Show Previous Runs</button>
+        <!-- New section for paginated previous runs table -->
+        <div id="previousRunsSection" style="display:none; margin-top:20px;">
+            <label for="pageSizeSelect">Runs per page:</label>
+            <select id="pageSizeSelect">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+            <div style="margin:10px 0;">
+                <button id="prevPage">Previous</button>
+                <button id="nextPage">Next</button>
+            </div>
+            <div id="previous-runs-container">
+                <!-- Previous runs table will be rendered here -->
+            </div>
+        </div>
     </div>
 
     <script src="script.js"></script>

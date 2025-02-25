@@ -342,7 +342,7 @@ document.getElementById("stop").addEventListener("click", () => {
     
     // Update the run object with final data
     const endTime = Date.now();
-    const runTime = endTime - startTime;
+    const runTime = (endTime - startTime) / 1000; // convert to seconds
     const pace = totalDistance > 0 ? (runTime / (totalDistance / 1000)) : 0;
     
     // Get the run from DB and update it
@@ -357,7 +357,7 @@ document.getElementById("stop").addEventListener("click", () => {
                 runData.endTime = endTime;
                 runData.distance = totalDistance;
                 runData.time = runTime;
-                runData.pace = pace / 1000; // Convert to seconds
+                runData.pace = pace; // pace in sec/km
                 runData.timeSeries = timeSeriesData;
                 
                 updateRun(runData)
@@ -463,7 +463,87 @@ function startTracking() {
             }
         }
         prevPosition = { lat: latitude, lon: longitude };
+    }, (error) => {
+        console.error("Geolocation error:", error);
+    }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+
+// Add new functions and UI for previous runs
+let currentPage = 0;
+let currentPageSize = 5;
+let sortedRuns = [];
+
+// Load all runs sorted by startTime descending
+function loadAllRuns() {
+    return getAllRuns().then(runs => {
+        return runs.sort((a, b) => b.startTime - a.startTime);
     });
 }
+
+function renderPreviousRunsTable() {
+    const container = document.getElementById("previous-runs-container");
+    container.innerHTML = "";
+    
+    const startIdx = currentPage * currentPageSize;
+    const pageRuns = sortedRuns.slice(startIdx, startIdx + currentPageSize);
+    
+    if (pageRuns.length === 0) {
+        container.innerHTML = "<p>No runs found.</p>";
+        return;
+    }
+    
+    let table = `<table border="1" cellpadding="5" cellspacing="0">
+        <tr>
+            <th>Date</th>
+            <th>Distance (km)</th>
+            <th>Time (s)</th>
+            <th>Pace (s/km)</th>
+        </tr>`;
+    pageRuns.forEach(run => {
+        table += `<tr>
+            <td>${new Date(run.startTime).toLocaleString()}</td>
+            <td>${(run.distance/1000).toFixed(2)}</td>
+            <td>${Math.floor(run.time)}</td>
+            <td>${Math.floor(run.pace)}</td>
+        </tr>`;
+    });
+    table += `</table>`;
+    container.innerHTML = table;
+    
+    // Update pagination buttons
+    document.getElementById("prevPage").disabled = currentPage === 0;
+    document.getElementById("nextPage").disabled = (startIdx + currentPageSize) >= sortedRuns.length;
+}
+
+// Event handler for Show Previous Runs button
+document.getElementById("showPreviousRuns").addEventListener("click", () => {
+    loadAllRuns().then(runs => {
+        sortedRuns = runs;
+        currentPage = 0;
+        renderPreviousRunsTable();
+        document.getElementById("previousRunsSection").style.display = "block";
+    }).catch(error => console.error("Error loading runs:", error));
+});
+
+// Event handler for page size change
+document.getElementById("pageSizeSelect").addEventListener("change", (e) => {
+    currentPageSize = parseInt(e.target.value);
+    currentPage = 0;
+    renderPreviousRunsTable();
+});
+
+// Next and Previous page buttons
+document.getElementById("prevPage").addEventListener("click", () => {
+    if (currentPage > 0) {
+        currentPage--;
+        renderPreviousRunsTable();
+    }
+});
+document.getElementById("nextPage").addEventListener("click", () => {
+    if ((currentPage + 1) * currentPageSize < sortedRuns.length) {
+        currentPage++;
+        renderPreviousRunsTable();
+    }
+});
 
 initMap();
