@@ -28,7 +28,8 @@ p {
 }
 
 #distance,
-#time {
+#time,
+#pace {
     font-weight: bold;
     color: #e91e63; /* Accent color */
 }

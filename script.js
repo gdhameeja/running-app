@@ -60,6 +60,7 @@ document.getElementById("start").addEventListener("click", () => {
 
     document.getElementById("distance").textContent = "0.00 kms";
     document.getElementById("time").textContent = "0:00";
+    document.getElementById("pace").textContent = "0:00 /km";
 
     clearInterval(timerInterval);
     updateTimer();
@@ -117,6 +118,12 @@ function updateTimer() {
     timerInterval = setInterval(() => {
         elapsedTime = ((Date.now() - startTime) / 1000);
         document.getElementById("time").textContent = formatTime(Math.floor(elapsedTime));
+        
+        // Calculate and update pace
+        if (totalDistance > 0) {
+            const paceInSeconds = (elapsedTime / (totalDistance / 1000));
+            document.getElementById("pace").textContent = `${formatTime(Math.floor(paceInSeconds))} /km`;
+        }
     }, 1000);
 }
 
