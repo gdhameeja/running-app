@@ -36,6 +36,202 @@ let pausedTime = 0;
 const kalmanLat = new KalmanFilter(0.0001, 0.0005, 1, 25.276987);
 const kalmanLon = new KalmanFilter(0.0001, 0.0005, 1, 55.296249);
 
+// Add new global variables for run tracking and IndexedDB
+let db;
+let currentRunId = null;
+let timeSeriesData = [];
+let lastTimeSeriesDistance = 0;
+let timeSeriesInterval = 400; // Capture data every 400 meters
+
+// Initialize IndexedDB
+function initDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open("RunDB", 1);
+        
+        request.onerror = (event) => {
+            console.error("IndexedDB error:", event.target.error);
+            reject("Error opening database");
+        };
+        
+        request.onsuccess = (event) => {
+            db = event.target.result;
+            console.log("Database opened successfully");
+            resolve(db);
+        };
+        
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            
+            // Create object store for runs if it doesn't exist
+            if (!db.objectStoreNames.contains("runs")) {
+                const runsStore = db.createObjectStore("runs", { keyPath: "runId" });
+                runsStore.createIndex("startTime", "startTime", { unique: false });
+                console.log("Object store 'runs' created");
+            }
+        };
+    });
+}
+
+// Save new run to IndexedDB
+function saveRun(runData) {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(["runs"], "readwrite");
+        const runsStore = transaction.objectStore("runs");
+        const request = runsStore.add(runData);
+        
+        request.onsuccess = () => {
+            console.log("Run saved successfully");
+            resolve(request.result);
+        };
+        
+        request.onerror = (event) => {
+            console.error("Error saving run:", event.target.error);
+            reject("Error saving run");
+        };
+    });
+}
+
+// Update existing run in IndexedDB
+function updateRun(runData) {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(["runs"], "readwrite");
+        const runsStore = transaction.objectStore("runs");
+        const request = runsStore.put(runData);
+        
+        request.onsuccess = () => {
+            console.log("Run updated successfully");
+            resolve(request.result);
+        };
+        
+        request.onerror = (event) => {
+            console.error("Error updating run:", event.target.error);
+            reject("Error updating run");
+        };
+    });
+}
+
+// Get all runs from IndexedDB
+function getAllRuns() {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(["runs"], "readonly");
+        const runsStore = transaction.objectStore("runs");
+        const request = runsStore.getAll();
+        
+        request.onsuccess = () => {
+            resolve(request.result);
+        };
+        
+        request.onerror = (event) => {
+            console.error("Error retrieving runs:", event.target.error);
+            reject("Error retrieving runs");
+        };
+    });
+}
+
+// Get latest run from IndexedDB
+function getLatestRun() {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(["runs"], "readonly");
+        const runsStore = transaction.objectStore("runs");
+        const index = runsStore.index("startTime");
+        const request = index.openCursor(null, "prev");
+        
+        request.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) {
+                resolve(cursor.value);
+            } else {
+                resolve(null); // No previous run found
+            }
+        };
+        
+        request.onerror = (event) => {
+            console.error("Error retrieving latest run:", event.target.error);
+            reject("Error retrieving latest run");
+        };
+    });
+}
+
+// Get yearly runs for analysis
+function getYearlyRuns(year = new Date().getFullYear()) {
+    return new Promise((resolve, reject) => {
+        getAllRuns()
+            .then(runs => {
+                const yearlyRuns = runs.filter(run => {
+                    const runDate = new Date(run.startTime);
+                    return runDate.getFullYear() === year;
+                });
+                resolve(yearlyRuns);
+            })
+            .catch(error => reject(error));
+    });
+}
+
+// Find previous time from the time series at a specific distance
+function findPreviousTime(timeSeries, currentDistance) {
+    if (!timeSeries || timeSeries.length === 0) return null;
+    
+    // Find the closest distance entry
+    for (let i = 0; i < timeSeries.length; i++) {
+        if (timeSeries[i].distance >= currentDistance) {
+            return timeSeries[i].time;
+        }
+    }
+    return null;
+}
+
+// Compare current run with previous run at same distance
+function compareWithPreviousRun(previousRunTimeSeries, currentDistance, currentTime) {
+    if (!previousRunTimeSeries) return;
+    
+    const previousTime = findPreviousTime(previousRunTimeSeries, currentDistance);
+    if (previousTime === null) return;
+    
+    const difference = previousTime - currentTime;
+    const formattedDifference = formatTime(Math.abs(difference));
+    
+    if (difference > 0) {
+        speakText(`You are ${formattedDifference} faster than your last run at this distance.`);
+    } else if (difference < 0) {
+        speakText(`You are ${formattedDifference} slower than your last run at this distance.`);
+    } else {
+        speakText(`You are at the same pace as your last run.`);
+    }
+}
+
+// Display run summary after stopping
+function displayRunSummary(run) {
+    const summaryElement = document.createElement("div");
+    summaryElement.className = "run-summary";
+    summaryElement.innerHTML = `
+        <h3>Run Summary</h3>
+        <p>Date: ${new Date(run.startTime).toLocaleString()}</p>
+        <p>Distance: ${(run.distance / 1000).toFixed(2)} km</p>
+        <p>Time: ${formatTime(Math.floor(run.time / 1000))}</p>
+        <p>Average Pace: ${formatTime(Math.floor(run.pace))} /km</p>
+    `;
+    
+    const container = document.querySelector(".container");
+    
+    // Remove previous summary if exists
+    const existingSummary = document.querySelector(".run-summary");
+    if (existingSummary) {
+        existingSummary.remove();
+    }
+    
+    container.appendChild(summaryElement);
+}
+
+// Initialize DB when the page loads
+document.addEventListener("DOMContentLoaded", () => {
+    initDB()
+        .then(() => {
+            console.log("Database initialized");
+            initMap();
+        })
+        .catch(error => console.error("Failed to initialize database:", error));
+});
+
 function initMap() {
     map = L.map("map").setView([25.276987, 55.296249], 15);
 
@@ -51,6 +247,7 @@ function initMap() {
     }, 500);
 }
 
+// Modify start button event listener
 document.getElementById("start").addEventListener("click", () => {
     totalDistance = 0;
     prevPosition = null;
@@ -59,21 +256,58 @@ document.getElementById("start").addEventListener("click", () => {
     lastMilestoneTime = startTime;
     pathCoordinates = [];
     elapsedTime = 0;
-    isPaused = false;
-    pausedTime = 0;
-
+    timeSeriesData = [];
+    lastTimeSeriesDistance = 0;
+    
     document.getElementById("distance").textContent = "0.00 kms";
     document.getElementById("time").textContent = "0:00";
     document.getElementById("pace").textContent = "0:00 /km";
+    
+    // Remove previous summary if exists
+    const existingSummary = document.querySelector(".run-summary");
+    if (existingSummary) {
+        existingSummary.remove();
+    }
 
-    clearInterval(timerInterval);
-    updateTimer();
+    // Create new run object
+    currentRunId = Date.now();
+    const newRun = {
+        runId: currentRunId,
+        startTime: startTime,
+        endTime: null,
+        distance: 0,
+        time: 0,
+        pace: 0,
+        timeSeries: []
+    };
+    
+    // Save initial run data
+    saveRun(newRun)
+        .then(() => {
+            // Get previous run for comparison
+            return getLatestRun();
+        })
+        .then(previousRun => {
+            // Store previous run time series for comparison
+            if (previousRun && previousRun.runId !== currentRunId) {
+                window.previousRunTimeSeries = previousRun.timeSeries;
+            } else {
+                window.previousRunTimeSeries = null;
+            }
+            
+            clearInterval(timerInterval);
+            updateTimer();
 
-    watchId = startTracking();
-
-    document.getElementById("start").disabled = true;
-    document.getElementById("stop").disabled = false;
-    document.getElementById("pause").disabled = false;
+            // Start tracking
+            isPaused = false;
+            pausedTime = 0;
+            document.getElementById("pause").disabled = false;
+            document.getElementById("start").disabled = true;
+            document.getElementById("stop").disabled = false;
+            
+            watchId = startTracking();
+        })
+        .catch(error => console.error("Error starting run:", error));
 });
 
 document.getElementById("pause").addEventListener("click", () => {
@@ -96,6 +330,7 @@ document.getElementById("pause").addEventListener("click", () => {
     }
 });
 
+// Modify stop button event listener
 document.getElementById("stop").addEventListener("click", () => {
     navigator.geolocation.clearWatch(watchId);
     clearInterval(timerInterval);
@@ -104,6 +339,40 @@ document.getElementById("stop").addEventListener("click", () => {
     document.getElementById("pause").disabled = true;
     document.getElementById("pause").textContent = "Pause";
     isPaused = false;
+    
+    // Update the run object with final data
+    const endTime = Date.now();
+    const runTime = endTime - startTime;
+    const pace = totalDistance > 0 ? (runTime / (totalDistance / 1000)) : 0;
+    
+    // Get the run from DB and update it
+    if (currentRunId) {
+        const transaction = db.transaction(["runs"], "readwrite");
+        const runsStore = transaction.objectStore("runs");
+        const request = runsStore.get(currentRunId);
+        
+        request.onsuccess = () => {
+            const runData = request.result;
+            if (runData) {
+                runData.endTime = endTime;
+                runData.distance = totalDistance;
+                runData.time = runTime;
+                runData.pace = pace / 1000; // Convert to seconds
+                runData.timeSeries = timeSeriesData;
+                
+                updateRun(runData)
+                    .then(() => {
+                        console.log("Run updated successfully");
+                        displayRunSummary(runData);
+                    })
+                    .catch(error => console.error("Error updating run:", error));
+            }
+        };
+        
+        request.onerror = (event) => {
+            console.error("Error retrieving run:", event.target.error);
+        };
+    }
 });
 
 function speakText(text) {
@@ -143,6 +412,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
+// Enhance tracking function to store time-series data
 function startTracking() {
     return navigator.geolocation.watchPosition(position => {
         let { latitude, longitude } = position.coords;
@@ -162,6 +432,26 @@ function startTracking() {
             userMarker.setLatLng([latitude, longitude]);
             map.setView([latitude, longitude]);
 
+            // Check for time-series data capture (every 400 meters)
+            if (totalDistance - lastTimeSeriesDistance >= timeSeriesInterval) {
+                const currentTime = Date.now() - startTime;
+                
+                // Save time-series data point
+                const dataPoint = { 
+                    distance: Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval, 
+                    time: currentTime 
+                };
+                timeSeriesData.push(dataPoint);
+                
+                // Compare with previous run if available
+                if (window.previousRunTimeSeries) {
+                    compareWithPreviousRun(window.previousRunTimeSeries, dataPoint.distance, currentTime);
+                }
+                
+                lastTimeSeriesDistance = Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval;
+            }
+
+            // Original milestone announcement
             if (totalDistance >= nextMilestone) {
                 let now = Date.now();
                 let timeTaken = ((now - lastMilestoneTime) / 1000).toFixed(0);
