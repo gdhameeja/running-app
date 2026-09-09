@@ -24,6 +24,16 @@
 
         <!-- ═══ TRACK TAB ═══ -->
         <div class="tab-content active" id="tab-track">
+            <!-- Guided Run Coach Panel -->
+            <div id="guided-run-panel" style="display:none;">
+                <div class="gr-session-title" id="gr-session-name"></div>
+                <div class="gr-type" id="gr-segment-type">GET READY</div>
+                <div class="gr-intensity" id="gr-segment-intensity"></div>
+                <div class="gr-countdown" id="gr-time-remaining">--:--</div>
+                <div class="gr-progress-bar"><div class="gr-progress-fill" id="gr-segment-progress"></div></div>
+                <div class="gr-next" id="gr-next-segment"></div>
+                <div class="gr-count" id="gr-segment-count"></div>
+            </div>
             <div id="map"></div>
             <p>Distance: <span id="distance">0.00 kms</span></p>
             <p>Time Elapsed: <span id="time">0:00</span></p>

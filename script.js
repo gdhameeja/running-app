@@ -36,6 +36,7 @@ let currentRunId = null;
 let timeSeriesData = [];
 let lastTimeSeriesDistance = 0;
 let timeSeriesInterval = 400;
+let guidedRun = null;
 
 // ─── IndexedDB (v2: adds courseProgress store) ─────────────────────────────────
 
@@ -303,6 +304,7 @@ document.getElementById("pause").addEventListener("click", () => {
         pausedTime = Date.now();
         isPaused = true;
         pauseButton.innerHTML = '<span class="material-icons">play_arrow</span>';
+        if (guidedRun) pauseGuidedRun();
     } else {
         startTime += (Date.now() - pausedTime);
         lastMilestoneTime += (Date.now() - pausedTime);
@@ -310,6 +312,7 @@ document.getElementById("pause").addEventListener("click", () => {
         watchId = startTracking();
         isPaused = false;
         pauseButton.innerHTML = '<span class="material-icons">pause</span>';
+        if (guidedRun) resumeGuidedRun();
     }
 });
 
@@ -323,6 +326,12 @@ document.getElementById("stop").addEventListener("click", () => {
 
     if (isPaused) startTime += (Date.now() - pausedTime);
     isPaused = false;
+
+    if (guidedRun) {
+        clearInterval(guidedRun.segmentInterval);
+        document.getElementById("guided-run-panel").style.display = "none";
+        guidedRun = null;
+    }
 
     const endTime = Date.now();
     const runTime = (endTime - startTime) / 1000;
@@ -602,10 +611,13 @@ function renderSessionList(course, levelKey, progress) {
         }
 
         let actionHtml = "";
-        if (progress && progress.level === levelKey && !isCompleted) {
-            actionHtml = `<button class="mark-complete-btn" data-idx="${idx}">Mark Complete</button>`;
-        } else if (isCompleted) {
+        if (isCompleted) {
             actionHtml = '<span class="completed-badge">✓ Done</span>';
+        } else {
+            actionHtml = `<button class="guided-run-btn" data-idx="${idx}" data-course="${course.id}" data-level="${levelKey}">▶ Guided Run</button>`;
+            if (progress && progress.level === levelKey) {
+                actionHtml += ` <button class="mark-complete-btn" data-idx="${idx}">Mark Complete</button>`;
+            }
         }
 
         card.innerHTML = `
@@ -623,6 +635,13 @@ function renderSessionList(course, levelKey, progress) {
         btn.addEventListener("click", (e) => {
             e.stopPropagation();
             markSessionComplete(parseInt(btn.dataset.idx));
+        });
+    });
+
+    container.querySelectorAll(".guided-run-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            startGuidedRun(btn.dataset.course, btn.dataset.level, parseInt(btn.dataset.idx));
         });
     });
 }
@@ -733,3 +752,206 @@ document.getElementById("acb-abandon").addEventListener("click", () => {
         }
     });
 });
+
+// ─── Guided Run (Voice-Coached Workouts) ───────────────────────────────────────
+
+const SEGMENT_NAMES = {
+    warmup: "Warm up", cooldown: "Cool down", run: "Run",
+    sprint: "Sprint", jog: "Jog", walk: "Walk", rest: "Rest"
+};
+
+function startGuidedRun(courseId, levelKey, sessionIndex) {
+    if (document.getElementById("start").disabled) {
+        alert("Stop your current run before starting a guided run.");
+        return;
+    }
+
+    const course = COURSES.find(c => c.id === courseId);
+    if (!course) return;
+    const sess = course.levels[levelKey].sessions[sessionIndex];
+
+    guidedRun = {
+        courseId, level: levelKey, sessionIndex, session: sess,
+        segments: sess.segments,
+        currentSegmentIndex: -1,
+        segmentStartTime: null,
+        segmentInterval: null,
+        segmentPausedElapsed: 0,
+        announcedWarnings: {}
+    };
+
+    // Auto-enroll if not already in this course+level
+    getCourseProgress(courseId).then(progress => {
+        if (!progress || progress.level !== levelKey) {
+            return saveCourseProgress({
+                progressId: `${courseId}-${levelKey}-${Date.now()}`,
+                courseId, level: levelKey,
+                startDate: Date.now(),
+                completedSessions: [],
+                status: "active"
+            });
+        }
+    }).then(() => {
+        // Switch to track tab
+        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+        document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+        document.querySelector('[data-tab="track"]').classList.add("active");
+        document.getElementById("tab-track").classList.add("active");
+        setTimeout(() => map.invalidateSize(), 100);
+
+        // Show panel with "get ready" state
+        const panel = document.getElementById("guided-run-panel");
+        panel.style.display = "block";
+        panel.className = "";
+        document.getElementById("gr-session-name").textContent = sess.title;
+        document.getElementById("gr-segment-type").textContent = "GET READY";
+        document.getElementById("gr-segment-intensity").textContent = "";
+        document.getElementById("gr-time-remaining").textContent = "";
+        document.getElementById("gr-next-segment").textContent = `First: ${SEGMENT_NAMES[sess.segments[0].type] || sess.segments[0].type}`;
+        document.getElementById("gr-segment-count").textContent = `${sess.segments.length} segments total`;
+        document.getElementById("gr-segment-progress").style.width = "0%";
+
+        // Start the actual run (GPS + timer)
+        document.getElementById("start").click();
+
+        // Countdown then start first segment
+        speakText("Get ready. Starting in 5 seconds.");
+        setTimeout(() => {
+            if (guidedRun) startSegment(0);
+        }, 5000);
+    });
+}
+
+function startSegment(index) {
+    if (!guidedRun) return;
+    if (index >= guidedRun.segments.length) {
+        completeGuidedRun();
+        return;
+    }
+
+    guidedRun.currentSegmentIndex = index;
+    guidedRun.segmentStartTime = Date.now();
+    guidedRun.segmentPausedElapsed = 0;
+    guidedRun.announcedWarnings = {};
+
+    const seg = guidedRun.segments[index];
+    const durationSec = Math.round(seg.duration * 60);
+
+    announceSegment(seg, durationSec);
+    updateGuidedRunUI();
+
+    clearInterval(guidedRun.segmentInterval);
+    guidedRun.segmentInterval = setInterval(() => updateGuidedRunUI(), 500);
+}
+
+function announceSegment(seg, durationSec) {
+    const name = SEGMENT_NAMES[seg.type] || seg.type;
+    let durStr;
+    if (durationSec >= 60) {
+        const mins = Math.floor(durationSec / 60);
+        const secs = durationSec % 60;
+        durStr = secs > 0 ? `${mins} minutes ${secs} seconds` : `${mins} minute${mins > 1 ? "s" : ""}`;
+    } else {
+        durStr = `${durationSec} seconds`;
+    }
+    speakText(`${name}. ${seg.intensity}. ${durStr}.`);
+}
+
+function updateGuidedRunUI() {
+    if (!guidedRun || guidedRun.currentSegmentIndex < 0) return;
+
+    const seg = guidedRun.segments[guidedRun.currentSegmentIndex];
+    const durationSec = Math.round(seg.duration * 60);
+    const elapsed = ((Date.now() - guidedRun.segmentStartTime) / 1000) - guidedRun.segmentPausedElapsed;
+    const remaining = Math.max(0, durationSec - elapsed);
+
+    // Update panel color
+    const panel = document.getElementById("guided-run-panel");
+    panel.className = `seg-${seg.type}`;
+
+    document.getElementById("gr-segment-type").textContent = (SEGMENT_NAMES[seg.type] || seg.type).toUpperCase();
+    document.getElementById("gr-segment-intensity").textContent = seg.intensity;
+
+    const remMins = Math.floor(remaining / 60);
+    const remSecs = Math.floor(remaining % 60);
+    document.getElementById("gr-time-remaining").textContent = `${remMins}:${remSecs.toString().padStart(2, "0")}`;
+
+    const pct = durationSec > 0 ? ((durationSec - remaining) / durationSec) * 100 : 100;
+    document.getElementById("gr-segment-progress").style.width = pct + "%";
+
+    document.getElementById("gr-segment-count").textContent =
+        `Segment ${guidedRun.currentSegmentIndex + 1} of ${guidedRun.segments.length}`;
+
+    const nextIdx = guidedRun.currentSegmentIndex + 1;
+    if (nextIdx < guidedRun.segments.length) {
+        const next = guidedRun.segments[nextIdx];
+        const nextDur = Math.round(next.duration * 60);
+        const nextDurStr = nextDur >= 60 ? `${Math.floor(nextDur / 60)}m` : `${nextDur}s`;
+        document.getElementById("gr-next-segment").textContent =
+            `Next: ${SEGMENT_NAMES[next.type] || next.type} — ${nextDurStr}`;
+    } else {
+        document.getElementById("gr-next-segment").textContent = "Final segment!";
+    }
+
+    // Voice countdowns
+    if (remaining <= 10 && remaining > 9 && !guidedRun.announcedWarnings["10"] && durationSec > 20) {
+        guidedRun.announcedWarnings["10"] = true;
+        speakText("10 seconds");
+    }
+    if (remaining <= 3 && remaining > 2 && !guidedRun.announcedWarnings["3"] && durationSec > 10) {
+        guidedRun.announcedWarnings["3"] = true;
+        speakText("3");
+    }
+    if (remaining <= 2 && remaining > 1 && !guidedRun.announcedWarnings["2"] && durationSec > 10) {
+        guidedRun.announcedWarnings["2"] = true;
+        speakText("2");
+    }
+    if (remaining <= 1 && remaining > 0 && !guidedRun.announcedWarnings["1"] && durationSec > 10) {
+        guidedRun.announcedWarnings["1"] = true;
+        speakText("1");
+    }
+
+    if (remaining <= 0) {
+        clearInterval(guidedRun.segmentInterval);
+        startSegment(guidedRun.currentSegmentIndex + 1);
+    }
+}
+
+function pauseGuidedRun() {
+    if (!guidedRun) return;
+    clearInterval(guidedRun.segmentInterval);
+    guidedRun._pauseStart = Date.now();
+}
+
+function resumeGuidedRun() {
+    if (!guidedRun || !guidedRun._pauseStart) return;
+    guidedRun.segmentPausedElapsed += (Date.now() - guidedRun._pauseStart) / 1000;
+    delete guidedRun._pauseStart;
+    guidedRun.segmentInterval = setInterval(() => updateGuidedRunUI(), 500);
+}
+
+function completeGuidedRun() {
+    if (!guidedRun) return;
+    clearInterval(guidedRun.segmentInterval);
+
+    speakText("Workout complete! Great job!");
+
+    // Mark session complete in course progress
+    getCourseProgress(guidedRun.courseId).then(progress => {
+        if (progress && progress.level === guidedRun.level) {
+            if (!progress.completedSessions.find(s => s.sessionIndex === guidedRun.sessionIndex)) {
+                progress.completedSessions.push({ sessionIndex: guidedRun.sessionIndex, date: Date.now() });
+                const course = COURSES.find(c => c.id === guidedRun.courseId);
+                const total = course.levels[progress.level].sessions.length;
+                if (progress.completedSessions.length >= total) progress.status = "completed";
+                saveCourseProgress(progress);
+            }
+        }
+
+        document.getElementById("guided-run-panel").style.display = "none";
+        guidedRun = null;
+
+        // Stop the run
+        document.getElementById("stop").click();
+    });
+}
