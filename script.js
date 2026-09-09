@@ -1,17 +1,20 @@
 class KalmanFilter {
-    constructor(processNoise = 1, measurementNoise = 1, estimateError = 1, initialEstimate = 0) {
+    constructor(processNoise, initialEstimate) {
         this.processNoise = processNoise;
-        this.measurementNoise = measurementNoise;
-        this.estimateError = estimateError;
+        this.estimateError = 1;
         this.estimate = initialEstimate;
-        this.kalmanGain = 0;
     }
 
-    update(measurement) {
+    update(measurement, accuracyMeters) {
+        // Weight measurement by GPS-reported accuracy
+        // Convert meters to degrees (1° lat ≈ 111320m), then square for variance
+        const accuracyDeg = accuracyMeters / 111320;
+        const measurementNoise = accuracyDeg * accuracyDeg;
+
         this.estimateError += this.processNoise;
-        this.kalmanGain = this.estimateError / (this.estimateError + this.measurementNoise);
-        this.estimate += this.kalmanGain * (measurement - this.estimate);
-        this.estimateError *= (1 - this.kalmanGain);
+        const kalmanGain = this.estimateError / (this.estimateError + measurementNoise);
+        this.estimate += kalmanGain * (measurement - this.estimate);
+        this.estimateError *= (1 - kalmanGain);
         return this.estimate;
     }
 }
@@ -30,6 +33,7 @@ let pausedTime = 0;
 
 let kalmanLat = null;
 let kalmanLon = null;
+let lastFixTime = null;
 
 let db;
 let currentRunId = null;
@@ -288,6 +292,7 @@ document.getElementById("start").addEventListener("click", () => {
             pausedTime = 0;
             kalmanLat = null;
             kalmanLon = null;
+            lastFixTime = null;
             document.getElementById("pause").disabled = false;
             document.getElementById("start").disabled = true;
             document.getElementById("stop").disabled = false;
@@ -396,18 +401,35 @@ function getDistance(lat1, lon1, lat2, lon2) {
 
 function startTracking() {
     return navigator.geolocation.watchPosition(position => {
+        const accuracy = position.coords.accuracy;
+
+        // 1) Reject inaccurate fixes (> 20m is unreliable for running)
+        if (accuracy > 20) return;
+
         let { latitude, longitude } = position.coords;
 
         if (!kalmanLat) {
-            kalmanLat = new KalmanFilter(0.0001, 0.0005, 1, latitude);
-            kalmanLon = new KalmanFilter(0.0001, 0.0005, 1, longitude);
+            kalmanLat = new KalmanFilter(0.0001, latitude);
+            kalmanLon = new KalmanFilter(0.0001, longitude);
+            lastFixTime = Date.now();
         }
 
-        latitude = kalmanLat.update(latitude);
-        longitude = kalmanLon.update(longitude);
+        // 2) Accuracy-weighted Kalman filter — tight GPS gets trusted more
+        latitude = kalmanLat.update(latitude, accuracy);
+        longitude = kalmanLon.update(longitude, accuracy);
 
         if (prevPosition) {
             const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
+
+            // 3) Dead zone: ignore movement < 3m (GPS jitter when stationary)
+            if (dist < 3) return;
+
+            // 4) Speed cap: reject if implied speed > 12.5 m/s (45 km/h)
+            const now = Date.now();
+            const timeDelta = (now - lastFixTime) / 1000;
+            if (timeDelta > 0 && (dist / timeDelta) > 12.5) return;
+            lastFixTime = now;
+
             totalDistance += dist;
             document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
 
@@ -432,12 +454,14 @@ function startTracking() {
             }
 
             if (totalDistance >= nextMilestone) {
-                let now = Date.now();
-                let timeTaken = ((now - lastMilestoneTime) / 1000).toFixed(0);
+                let now2 = Date.now();
+                let timeTaken = ((now2 - lastMilestoneTime) / 1000).toFixed(0);
                 speakText(`You've completed ${nextMilestone / 1000} kilometer in ${formatTime(timeTaken)}.`);
                 nextMilestone += 1000;
-                lastMilestoneTime = now;
+                lastMilestoneTime = now2;
             }
+        } else {
+            lastFixTime = Date.now();
         }
         prevPosition = { lat: latitude, lon: longitude };
     }, (error) => {
