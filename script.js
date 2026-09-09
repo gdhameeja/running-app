@@ -32,9 +32,9 @@ let elapsedTime = 0;
 let isPaused = false;
 let pausedTime = 0;
 
-// Kalman filters for latitude and longitude
-const kalmanLat = new KalmanFilter(0.0001, 0.0005, 1, 25.276987);
-const kalmanLon = new KalmanFilter(0.0001, 0.0005, 1, 55.296249);
+// Kalman filters for latitude and longitude — initialized on first GPS fix
+let kalmanLat = null;
+let kalmanLon = null;
 
 // Add new global variables for run tracking and IndexedDB
 let db;
@@ -233,18 +233,30 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function initMap() {
-    map = L.map("map").setView([25.276987, 55.296249], 15);
+    map = L.map("map").setView([0, 0], 2);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
 
-    userMarker = L.marker([25.276987, 55.296249]).addTo(map).bindPopup("You").openPopup();
+    userMarker = L.marker([0, 0]).addTo(map).bindPopup("You");
     pathLine = L.polyline([], { color: "red", weight: 4 }).addTo(map);
 
     setTimeout(() => {
         map.invalidateSize();
     }, 500);
+
+    navigator.geolocation.getCurrentPosition(
+        (position) => {
+            const { latitude, longitude } = position.coords;
+            map.setView([latitude, longitude], 15);
+            userMarker.setLatLng([latitude, longitude]).openPopup();
+        },
+        (error) => {
+            console.warn("Could not get initial position:", error.message);
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+    );
 }
 
 // Modify start button event listener
@@ -269,42 +281,38 @@ document.getElementById("start").addEventListener("click", () => {
         existingSummary.remove();
     }
 
-    // Create new run object
-    currentRunId = Date.now();
-    const newRun = {
-        runId: currentRunId,
-        startTime: startTime,
-        endTime: null,
-        distance: 0,
-        time: 0,
-        pace: 0,
-        timeSeries: []
-    };
-    
-    // Save initial run data
-    saveRun(newRun)
-        .then(() => {
-            // Get previous run for comparison
-            return getLatestRun();
-        })
+    // Fetch the previous run BEFORE saving the current one
+    getLatestRun()
         .then(previousRun => {
-            // Store previous run time series for comparison
-            if (previousRun && previousRun.runId !== currentRunId) {
+            if (previousRun) {
                 window.previousRunTimeSeries = previousRun.timeSeries;
             } else {
                 window.previousRunTimeSeries = null;
             }
-            
+
+            currentRunId = Date.now();
+            return saveRun({
+                runId: currentRunId,
+                startTime: startTime,
+                endTime: null,
+                distance: 0,
+                time: 0,
+                pace: 0,
+                timeSeries: []
+            });
+        })
+        .then(() => {
             clearInterval(timerInterval);
             updateTimer();
 
-            // Start tracking
             isPaused = false;
             pausedTime = 0;
+            kalmanLat = null;
+            kalmanLon = null;
             document.getElementById("pause").disabled = false;
             document.getElementById("start").disabled = true;
             document.getElementById("stop").disabled = false;
-            
+
             watchId = startTracking();
         })
         .catch(error => console.error("Error starting run:", error));
@@ -313,20 +321,18 @@ document.getElementById("start").addEventListener("click", () => {
 document.getElementById("pause").addEventListener("click", () => {
     const pauseButton = document.getElementById("pause");
     if (!isPaused) {
-        // Pause functionality
         navigator.geolocation.clearWatch(watchId);
         clearInterval(timerInterval);
         pausedTime = Date.now();
         isPaused = true;
-        pauseButton.textContent = "Resume";
+        pauseButton.innerHTML = '<span class="material-icons">play_arrow</span>';
     } else {
-        // Resume functionality
         startTime += (Date.now() - pausedTime);
         lastMilestoneTime += (Date.now() - pausedTime);
         updateTimer();
         watchId = startTracking();
         isPaused = false;
-        pauseButton.textContent = "Pause";
+        pauseButton.innerHTML = '<span class="material-icons">pause</span>';
     }
 });
 
@@ -337,12 +343,16 @@ document.getElementById("stop").addEventListener("click", () => {
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
     document.getElementById("pause").disabled = true;
-    document.getElementById("pause").textContent = "Pause";
+    document.getElementById("pause").innerHTML = '<span class="material-icons">pause</span>';
+
+    // If stopped while paused, adjust startTime to exclude paused duration
+    if (isPaused) {
+        startTime += (Date.now() - pausedTime);
+    }
     isPaused = false;
-    
-    // Update the run object with final data
+
     const endTime = Date.now();
-    const runTime = (endTime - startTime) / 1000; // convert to seconds
+    const runTime = (endTime - startTime) / 1000;
     const pace = totalDistance > 0 ? (runTime / (totalDistance / 1000)) : 0;
     
     // Get the run from DB and update it
@@ -416,7 +426,13 @@ function getDistance(lat1, lon1, lat2, lon2) {
 function startTracking() {
     return navigator.geolocation.watchPosition(position => {
         let { latitude, longitude } = position.coords;
-        
+
+        // Initialize Kalman filters on first GPS fix
+        if (!kalmanLat) {
+            kalmanLat = new KalmanFilter(0.0001, 0.0005, 1, latitude);
+            kalmanLon = new KalmanFilter(0.0001, 0.0005, 1, longitude);
+        }
+
         // Apply Kalman filter
         latitude = kalmanLat.update(latitude);
         longitude = kalmanLon.update(longitude);
@@ -465,12 +481,15 @@ function startTracking() {
         prevPosition = { lat: latitude, lon: longitude };
     }, (error) => {
         console.error("Geolocation error:", error);
+        if (error.code === error.PERMISSION_DENIED) {
+            alert("Location permission denied. Please enable location access to track your run.");
+        }
     }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
 }
 
 // Add new functions and UI for previous runs
 let currentPage = 0;
-let currentPageSize = 5;
+let currentPageSize = 10;
 let sortedRuns = [];
 
 // Load all runs sorted by startTime descending
@@ -496,15 +515,15 @@ function renderPreviousRunsTable() {
         <tr>
             <th>Date</th>
             <th>Distance (km)</th>
-            <th>Time (s)</th>
-            <th>Pace (s/km)</th>
+            <th>Time</th>
+            <th>Pace (/km)</th>
         </tr>`;
     pageRuns.forEach(run => {
         table += `<tr>
             <td>${new Date(run.startTime).toLocaleString()}</td>
             <td>${(run.distance/1000).toFixed(2)}</td>
-            <td>${Math.floor(run.time)}</td>
-            <td>${Math.floor(run.pace)}</td>
+            <td>${formatTime(Math.floor(run.time))}</td>
+            <td>${formatTime(Math.floor(run.pace))}</td>
         </tr>`;
     });
     table += `</table>`;
@@ -545,5 +564,3 @@ document.getElementById("nextPage").addEventListener("click", () => {
         renderPreviousRunsTable();
     }
 });
-
-initMap();
