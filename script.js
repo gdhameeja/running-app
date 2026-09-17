@@ -25,7 +25,9 @@ let totalDistance = 0;
 let prevPosition = null;
 let nextMilestone = 1000;
 let startTime, lastMilestoneTime;
-let pathCoordinates = [];
+let pathSegments = [];
+let currentSegment = [];
+let gapCoords = [];
 let timerInterval;
 let elapsedTime = 0;
 let isPaused = false;
@@ -39,8 +41,16 @@ let db;
 let currentRunId = null;
 let timeSeriesData = [];
 let lastTimeSeriesDistance = 0;
-let timeSeriesInterval = 400;
+let timeSeriesInterval = 100;
 let guidedRun = null;
+let ghostRace = null;
+
+let wakeLockSentinel = null;
+let bgAudioCtx = null;
+let gapLine = null;
+let autoSaveInterval = null;
+let ghostMarker = null;
+let lastTimeSeriesTime = 0;
 
 // ─── IndexedDB (v2: adds courseProgress store) ─────────────────────────────────
 
@@ -188,7 +198,7 @@ function displayRunSummary(run) {
         <h3>Run Summary</h3>
         <p>Date: ${new Date(run.startTime).toLocaleString()}</p>
         <p>Distance: ${(run.distance / 1000).toFixed(2)} km</p>
-        <p>Time: ${formatTime(Math.floor(run.time / 1000))}</p>
+        <p>Time: ${formatTime(Math.floor(run.time))}</p>
         <p>Average Pace: ${formatTime(Math.floor(run.pace))} /km</p>
     `;
     const container = document.getElementById("tab-track");
@@ -205,6 +215,7 @@ document.addEventListener("DOMContentLoaded", () => {
             initMap();
             initTabs();
             renderCourseGrid();
+            checkForInterruptedRun();
         })
         .catch(error => console.error("Failed to initialize database:", error));
 });
@@ -216,6 +227,7 @@ function initMap() {
     }).addTo(map);
     userMarker = L.marker([0, 0]).addTo(map).bindPopup("You");
     pathLine = L.polyline([], { color: "red", weight: 4 }).addTo(map);
+    gapLine = L.polyline([], { color: "#999", weight: 2, dashArray: "8,8", opacity: 0.5 }).addTo(map);
     setTimeout(() => map.invalidateSize(), 500);
     navigator.geolocation.getCurrentPosition(
         (position) => {
@@ -241,6 +253,9 @@ function initTabs() {
             if (tab.dataset.tab === "stats" && typeof renderStats === "function") {
                 renderStats();
             }
+            if (tab.dataset.tab === "ghost" && typeof renderGhostRaceTab === "function") {
+                renderGhostRaceTab();
+            }
             if (tab.dataset.tab === "courses") {
                 refreshActiveBanner();
             }
@@ -259,14 +274,21 @@ document.getElementById("start").addEventListener("click", () => {
     nextMilestone = 1000;
     startTime = Date.now();
     lastMilestoneTime = startTime;
-    pathCoordinates = [];
+    pathSegments = [];
+    currentSegment = [];
+    gapCoords = [];
     elapsedTime = 0;
     timeSeriesData = [];
     lastTimeSeriesDistance = 0;
+    lastTimeSeriesTime = 0;
 
     document.getElementById("distance").textContent = "0.00 kms";
     document.getElementById("time").textContent = "0:00";
     document.getElementById("pace").textContent = "0:00 /km";
+
+    if (pathLine) pathLine.setLatLngs([]);
+    if (gapLine) gapLine.setLatLngs([]);
+    if (ghostMarker) { map.removeLayer(ghostMarker); ghostMarker = null; }
 
     const existingSummary = document.querySelector(".run-summary");
     if (existingSummary) existingSummary.remove();
@@ -296,7 +318,10 @@ document.getElementById("start").addEventListener("click", () => {
             document.getElementById("pause").disabled = false;
             document.getElementById("start").disabled = true;
             document.getElementById("stop").disabled = false;
+            requestWakeLock();
+            startBackgroundAudio();
             watchId = startTracking();
+            startAutoSave();
         })
         .catch(error => console.error("Error starting run:", error));
 });
@@ -324,6 +349,10 @@ document.getElementById("pause").addEventListener("click", () => {
 document.getElementById("stop").addEventListener("click", () => {
     navigator.geolocation.clearWatch(watchId);
     clearInterval(timerInterval);
+    stopAutoSave();
+    releaseWakeLock();
+    stopBackgroundAudio();
+    if (ghostMarker) { map.removeLayer(ghostMarker); ghostMarker = null; }
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
     document.getElementById("pause").disabled = true;
@@ -331,6 +360,11 @@ document.getElementById("stop").addEventListener("click", () => {
 
     if (isPaused) startTime += (Date.now() - pausedTime);
     isPaused = false;
+
+    if (ghostRace) {
+        document.getElementById("ghost-panel").style.display = "none";
+        ghostRace = null;
+    }
 
     if (guidedRun) {
         clearInterval(guidedRun.segmentInterval);
@@ -365,10 +399,129 @@ document.getElementById("stop").addEventListener("click", () => {
 // ─── Utility ───────────────────────────────────────────────────────────────────
 
 function speakText(text) {
+    speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
     speechSynthesis.speak(utterance);
 }
+
+async function requestWakeLock() {
+    try {
+        if ('wakeLock' in navigator) {
+            wakeLockSentinel = await navigator.wakeLock.request('screen');
+            wakeLockSentinel.addEventListener('release', () => { wakeLockSentinel = null; });
+        }
+    } catch (e) {
+        console.warn('Wake Lock failed:', e);
+    }
+}
+
+function releaseWakeLock() {
+    if (wakeLockSentinel) { wakeLockSentinel.release(); wakeLockSentinel = null; }
+}
+
+function startBackgroundAudio() {
+    if (bgAudioCtx) return;
+    try {
+        bgAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = bgAudioCtx.createOscillator();
+        const gain = bgAudioCtx.createGain();
+        gain.gain.value = 0.001;
+        osc.connect(gain);
+        gain.connect(bgAudioCtx.destination);
+        osc.start();
+        if ('mediaSession' in navigator) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: 'Run in progress',
+                artist: 'Running Tracker'
+            });
+            navigator.mediaSession.playbackState = 'playing';
+        }
+    } catch (e) {
+        console.warn('Background audio failed:', e);
+    }
+}
+
+function stopBackgroundAudio() {
+    if (bgAudioCtx) { bgAudioCtx.close().catch(() => {}); bgAudioCtx = null; }
+    if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'none';
+    }
+}
+
+function startAutoSave() {
+    stopAutoSave();
+    autoSaveInterval = setInterval(() => {
+        if (currentRunId && !isPaused) autoSaveRun();
+    }, 30000);
+}
+
+function stopAutoSave() {
+    if (autoSaveInterval) { clearInterval(autoSaveInterval); autoSaveInterval = null; }
+}
+
+function autoSaveRun() {
+    if (!currentRunId || !db) return;
+    const tx = db.transaction(["runs"], "readwrite");
+    const store = tx.objectStore("runs");
+    const req = store.get(currentRunId);
+    req.onsuccess = () => {
+        const runData = req.result;
+        if (runData) {
+            const elapsed = isPaused
+                ? (pausedTime - startTime) / 1000
+                : (Date.now() - startTime) / 1000;
+            runData.distance = totalDistance;
+            runData.time = elapsed;
+            runData.pace = totalDistance > 0 ? (elapsed / (totalDistance / 1000)) : 0;
+            runData.timeSeries = timeSeriesData;
+            runData.pathSegments = [...pathSegments, currentSegment];
+            store.put(runData);
+        }
+    };
+}
+
+function checkForInterruptedRun() {
+    getAllRuns().then(runs => {
+        const interrupted = runs.find(r => r.endTime === null && r.distance > 50);
+        if (interrupted) {
+            const dist = (interrupted.distance / 1000).toFixed(2);
+            const time = formatTime(Math.floor(interrupted.time || 0));
+            if (confirm(`Found an interrupted run (${dist} km, ${time}). Save it?`)) {
+                interrupted.endTime = interrupted.startTime + (interrupted.time || 0) * 1000;
+                if (interrupted.distance > 0 && interrupted.time > 0) {
+                    interrupted.pace = interrupted.time / (interrupted.distance / 1000);
+                }
+                updateRun(interrupted).then(() => displayRunSummary(interrupted));
+            } else {
+                const tx = db.transaction(["runs"], "readwrite");
+                tx.objectStore("runs").delete(interrupted.runId);
+            }
+        }
+    });
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        window._lastHiddenTime = Date.now();
+        if (currentRunId && !isPaused) autoSaveRun();
+    } else {
+        if (watchId && window._lastHiddenTime) {
+            const hiddenDuration = Date.now() - window._lastHiddenTime;
+            if (hiddenDuration > 5000) {
+                kalmanLat = null;
+                kalmanLon = null;
+                prevPosition = null;
+            }
+        }
+        if (watchId) requestWakeLock();
+        if (bgAudioCtx && bgAudioCtx.state === 'suspended') {
+            bgAudioCtx.resume().catch(() => {});
+        }
+        if (map) setTimeout(() => map.invalidateSize(), 200);
+        delete window._lastHiddenTime;
+    }
+});
 
 function updateTimer() {
     clearInterval(timerInterval);
@@ -379,6 +532,7 @@ function updateTimer() {
             const paceInSeconds = (elapsedTime / (totalDistance / 1000));
             document.getElementById("pace").textContent = `${formatTime(Math.floor(paceInSeconds))} /km`;
         }
+        if (ghostRace) updateGhostPanel();
     }, 1000);
 }
 
@@ -403,7 +557,6 @@ function startTracking() {
     return navigator.geolocation.watchPosition(position => {
         const accuracy = position.coords.accuracy;
 
-        // 1) Reject inaccurate fixes (> 20m is unreliable for running)
         if (accuracy > 20) return;
 
         let { latitude, longitude } = position.coords;
@@ -414,54 +567,119 @@ function startTracking() {
             lastFixTime = Date.now();
         }
 
-        // 2) Accuracy-weighted Kalman filter — tight GPS gets trusted more
         latitude = kalmanLat.update(latitude, accuracy);
         longitude = kalmanLon.update(longitude, accuracy);
 
         if (prevPosition) {
             const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
 
-            // 3) Dead zone: ignore movement < 3m (GPS jitter when stationary)
             if (dist < 3) return;
 
-            // 4) Speed cap: reject if implied speed > 12.5 m/s (45 km/h)
             const now = Date.now();
             const timeDelta = (now - lastFixTime) / 1000;
+
+            if (timeDelta > 10 && currentSegment.length > 0) {
+                pathSegments.push([...currentSegment]);
+                gapCoords.push([
+                    currentSegment[currentSegment.length - 1],
+                    [latitude, longitude]
+                ]);
+                gapLine.setLatLngs(gapCoords);
+                currentSegment = [[latitude, longitude]];
+                pathLine.setLatLngs([...pathSegments, currentSegment]);
+                prevPosition = { lat: latitude, lon: longitude };
+                lastFixTime = now;
+                kalmanLat = new KalmanFilter(0.0001, latitude);
+                kalmanLon = new KalmanFilter(0.0001, longitude);
+                userMarker.setLatLng([latitude, longitude]);
+                map.setView([latitude, longitude]);
+                return;
+            }
+
             if (timeDelta > 0 && (dist / timeDelta) > 12.5) return;
             lastFixTime = now;
 
             totalDistance += dist;
             document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
 
-            pathCoordinates.push([latitude, longitude]);
-            pathLine.setLatLngs(pathCoordinates);
+            currentSegment.push([latitude, longitude]);
+            pathLine.setLatLngs([...pathSegments, currentSegment]);
             userMarker.setLatLng([latitude, longitude]);
             map.setView([latitude, longitude]);
 
+            const currentTimeMs = Date.now() - startTime;
+            const instantPace = timeDelta > 0 && dist > 0
+                ? (timeDelta / (dist / 1000)) : 0;
+
             if (totalDistance - lastTimeSeriesDistance >= timeSeriesInterval) {
-                const currentTime = Date.now() - startTime;
                 const dataPoint = {
                     distance: Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval,
-                    time: currentTime
+                    time: currentTimeMs,
+                    lat: latitude,
+                    lng: longitude,
+                    pace: instantPace
                 };
                 timeSeriesData.push(dataPoint);
 
                 if (window.previousRunTimeSeries) {
-                    compareWithPreviousRun(window.previousRunTimeSeries, dataPoint.distance, currentTime);
+                    compareWithPreviousRun(window.previousRunTimeSeries, dataPoint.distance, currentTimeMs);
                 }
 
                 lastTimeSeriesDistance = Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval;
+            }
+
+            if (currentTimeMs - lastTimeSeriesTime >= 60000) {
+                const alreadyRecorded = timeSeriesData.length > 0 &&
+                    Math.abs(timeSeriesData[timeSeriesData.length - 1].time - currentTimeMs) < 5000;
+                if (!alreadyRecorded) {
+                    timeSeriesData.push({
+                        distance: totalDistance,
+                        time: currentTimeMs,
+                        lat: latitude,
+                        lng: longitude,
+                        pace: instantPace
+                    });
+                }
+                lastTimeSeriesTime = currentTimeMs;
             }
 
             if (totalDistance >= nextMilestone) {
                 let now2 = Date.now();
                 let timeTaken = ((now2 - lastMilestoneTime) / 1000).toFixed(0);
                 speakText(`You've completed ${nextMilestone / 1000} kilometer in ${formatTime(timeTaken)}.`);
+
+                if (ghostRace && typeof getGhostTimeAtDistance === "function") {
+                    const ghostTimeMs = getGhostTimeAtDistance(ghostRace.ghostTimeSeries, nextMilestone);
+                    const yourTimeMs = now2 - startTime;
+                    if (ghostTimeMs !== null) {
+                        const diffSec = Math.round(Math.abs(ghostTimeMs - yourTimeMs) / 1000);
+                        const diffStr = formatTime(diffSec);
+                        if (yourTimeMs < ghostTimeMs) {
+                            setTimeout(() => speakText(`${diffStr} ahead of your ghost.`), 2500);
+                        } else if (yourTimeMs > ghostTimeMs) {
+                            setTimeout(() => speakText(`${diffStr} behind your ghost.`), 2500);
+                        }
+                    }
+                }
+
                 nextMilestone += 1000;
                 lastMilestoneTime = now2;
             }
         } else {
             lastFixTime = Date.now();
+            if (currentSegment.length > 0) {
+                pathSegments.push([...currentSegment]);
+                gapCoords.push([
+                    currentSegment[currentSegment.length - 1],
+                    [latitude, longitude]
+                ]);
+                gapLine.setLatLngs(gapCoords);
+                currentSegment = [];
+            }
+            currentSegment.push([latitude, longitude]);
+            pathLine.setLatLngs([...pathSegments, currentSegment]);
+            userMarker.setLatLng([latitude, longitude]);
+            map.setView([latitude, longitude]);
         }
         prevPosition = { lat: latitude, lon: longitude };
     }, (error) => {
@@ -470,6 +688,111 @@ function startTracking() {
             alert("Location permission denied. Please enable location access to track your run.");
         }
     }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+
+// ─── Ghost Race ───────────────────────────────────────────────────────────────
+
+function startGhostRaceMode(km, ghostData) {
+    if (document.getElementById("start").disabled) {
+        alert("Stop your current run before starting a ghost race.");
+        return;
+    }
+
+    ghostRace = {
+        targetKm: km,
+        ghostTimeSeries: ghostData.timeSeries,
+        ghostTotalTime: ghostData.time,
+        ghostTotalDistance: ghostData.distance,
+        ghostPace: ghostData.pace,
+        finished: false
+    };
+
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+    document.querySelector('[data-tab="track"]').classList.add("active");
+    document.getElementById("tab-track").classList.add("active");
+    setTimeout(() => map.invalidateSize(), 100);
+
+    const panel = document.getElementById("ghost-panel");
+    panel.style.display = "block";
+    document.getElementById("ghost-panel-title").textContent = `Ghost Race: ${km}K PB`;
+    document.getElementById("ghost-your-dist").textContent = "0.00 km";
+    document.getElementById("ghost-ghost-dist").textContent = "0.00 km";
+    document.getElementById("ghost-your-pace").textContent = "--:-- /km";
+    document.getElementById("ghost-ghost-pace").textContent = formatTime(Math.floor(ghostData.pace)) + " /km";
+    document.getElementById("ghost-diff").textContent = "Starting...";
+    document.getElementById("ghost-diff").className = "ghost-diff-bar";
+
+    document.getElementById("start").click();
+}
+
+function updateGhostPanel() {
+    if (!ghostRace) return;
+
+    const elapsedMs = Date.now() - startTime;
+    const ghostDist = getGhostDistanceAtTime(ghostRace.ghostTimeSeries, elapsedMs);
+
+    document.getElementById("ghost-your-dist").textContent = (totalDistance / 1000).toFixed(2) + " km";
+    document.getElementById("ghost-ghost-dist").textContent = (ghostDist / 1000).toFixed(2) + " km";
+
+    if (typeof getGhostPositionAtTime === "function") {
+        const ghostPos = getGhostPositionAtTime(ghostRace.ghostTimeSeries, elapsedMs);
+        if (ghostPos) {
+            if (!ghostMarker) {
+                const ghostIcon = L.divIcon({
+                    className: 'ghost-map-marker',
+                    html: '<span style="font-size:24px;opacity:0.7">👻</span>',
+                    iconSize: [30, 30],
+                    iconAnchor: [15, 15]
+                });
+                ghostMarker = L.marker(ghostPos, { icon: ghostIcon }).addTo(map);
+            } else {
+                ghostMarker.setLatLng(ghostPos);
+            }
+        }
+    }
+
+    if (totalDistance > 50) {
+        const yourPaceSec = (elapsedMs / 1000) / (totalDistance / 1000);
+        document.getElementById("ghost-your-pace").textContent = formatTime(Math.floor(yourPaceSec)) + " /km";
+    }
+
+    const targetDist = ghostRace.targetKm * 1000;
+    const yourFinished = totalDistance >= targetDist;
+    const ghostFinished = ghostDist >= targetDist;
+
+    const diff = totalDistance - ghostDist;
+    const diffEl = document.getElementById("ghost-diff");
+
+    if (yourFinished && !ghostRace.finished) {
+        ghostRace.finished = true;
+        const ghostTimeMs = getGhostTimeAtDistance(ghostRace.ghostTimeSeries, targetDist);
+        if (ghostTimeMs !== null && elapsedMs < ghostTimeMs) {
+            diffEl.textContent = "You beat your PB ghost!";
+            diffEl.className = "ghost-diff-bar ahead";
+            speakText("You beat your ghost! New personal best pace!");
+        } else {
+            diffEl.textContent = "Ghost wins this time. Keep pushing!";
+            diffEl.className = "ghost-diff-bar behind";
+            speakText("Ghost wins. Great effort, keep training!");
+        }
+        return;
+    }
+
+    if (ghostFinished && !yourFinished) {
+        const remaining = ((targetDist - totalDistance) / 1000).toFixed(2);
+        diffEl.textContent = `Ghost finished! ${remaining} km to go`;
+        diffEl.className = "ghost-diff-bar behind";
+    } else if (Math.abs(diff) < 10) {
+        diffEl.textContent = "Neck and neck!";
+        diffEl.className = "ghost-diff-bar tied";
+    } else if (diff > 0) {
+        diffEl.textContent = `You're ${Math.round(diff)}m ahead!`;
+        diffEl.className = "ghost-diff-bar ahead";
+    } else {
+        diffEl.textContent = `Ghost is ${Math.round(Math.abs(diff))}m ahead`;
+        diffEl.className = "ghost-diff-bar behind";
+    }
 }
 
 // ─── Previous Runs Table ───────────────────────────────────────────────────────

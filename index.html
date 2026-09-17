@@ -19,6 +19,7 @@
         <div class="tab-bar">
             <button class="tab active" data-tab="track">Track</button>
             <button class="tab" data-tab="courses">Courses</button>
+            <button class="tab" data-tab="ghost">Ghost Race</button>
             <button class="tab" data-tab="stats">Stats</button>
         </div>
 
@@ -33,6 +34,27 @@
                 <div class="gr-progress-bar"><div class="gr-progress-fill" id="gr-segment-progress"></div></div>
                 <div class="gr-next" id="gr-next-segment"></div>
                 <div class="gr-count" id="gr-segment-count"></div>
+            </div>
+            <!-- Ghost Race Comparison Panel -->
+            <div id="ghost-panel" style="display:none;">
+                <div class="ghost-panel-header">
+                    <span class="ghost-emoji">👻</span>
+                    <span id="ghost-panel-title">Ghost Race</span>
+                </div>
+                <div class="ghost-comparison">
+                    <div class="ghost-col">
+                        <div class="ghost-label">YOU</div>
+                        <div class="ghost-stat" id="ghost-your-dist">0.00 km</div>
+                        <div class="ghost-stat-small" id="ghost-your-pace">--:-- /km</div>
+                    </div>
+                    <div class="ghost-vs">VS</div>
+                    <div class="ghost-col">
+                        <div class="ghost-label">GHOST</div>
+                        <div class="ghost-stat" id="ghost-ghost-dist">0.00 km</div>
+                        <div class="ghost-stat-small" id="ghost-ghost-pace">--:-- /km</div>
+                    </div>
+                </div>
+                <div class="ghost-diff-bar" id="ghost-diff">Starting...</div>
             </div>
             <div id="map"></div>
             <p>Distance: <span id="distance">0.00 kms</span></p>
@@ -95,6 +117,11 @@
                 <button id="start-course" class="btn-primary">Start Course</button>
                 <div id="session-list"></div>
             </div>
+        </div>
+
+        <!-- ═══ GHOST RACE TAB ═══ -->
+        <div class="tab-content" id="tab-ghost">
+            <div id="ghost-race-content"></div>
         </div>
 
         <!-- ═══ STATS TAB ═══ -->

@@ -2,7 +2,7 @@
 
 function calcPaceTrend(runs, limit = 20) {
     const sorted = runs
-        .filter(r => r.distance > 0 && r.time > 0)
+        .filter(r => r.distance >= 500 && r.time > 0 && r.pace > 120 && r.pace < 1200)
         .sort((a, b) => a.startTime - b.startTime)
         .slice(-limit);
     return sorted.map(r => ({
@@ -30,7 +30,7 @@ function calcWeeklyVolume(runs, weeks = 8) {
 }
 
 function calcPersonalBests(runs) {
-    const targets = [1, 5, 10];
+    const targets = [1, 3, 5, 10];
     const bests = {};
     targets.forEach(km => {
         const qualifying = runs.filter(r => r.distance >= km * 1000 && r.time > 0);
@@ -127,6 +127,8 @@ function renderPaceChart(runs) {
                 y: {
                     reverse: true,
                     title: { display: true, text: "min/km" },
+                    suggestedMin: 2,
+                    suggestedMax: 15,
                     ticks: {
                         callback: v => {
                             const m = Math.floor(v);
@@ -170,7 +172,7 @@ function renderPersonalBests(runs) {
     const bests = calcPersonalBests(runs);
     const container = document.getElementById("personal-bests");
     container.innerHTML = "";
-    [1, 5, 10].forEach(km => {
+    [1, 3, 5, 10].forEach(km => {
         const card = document.createElement("div");
         card.className = "pb-card";
         if (bests[km]) {
@@ -197,6 +199,171 @@ function renderVO2max(runs) {
     } else {
         document.getElementById("vo2max-section").style.display = "none";
     }
+}
+
+// ─── Ghost Race Helpers ───────────────────────────────────────────────────────
+
+function getBestRunsForGhost(runs) {
+    const targets = [1, 3, 5, 10];
+    const ghosts = {};
+    targets.forEach(km => {
+        const withTimeSeries = runs.filter(r =>
+            r.distance >= km * 1000 && r.time > 0 &&
+            r.timeSeries && r.timeSeries.length > 0
+        );
+        const withoutTimeSeries = runs.filter(r =>
+            r.distance >= km * 1000 && r.time > 0 &&
+            (!r.timeSeries || r.timeSeries.length === 0)
+        );
+
+        let bestRun = null, bestPace = Infinity, simulated = false;
+
+        withTimeSeries.forEach(r => {
+            const pace = r.time / (r.distance / 1000);
+            if (pace < bestPace) { bestPace = pace; bestRun = r; }
+        });
+
+        if (!bestRun && withoutTimeSeries.length > 0) {
+            withoutTimeSeries.forEach(r => {
+                const pace = r.time / (r.distance / 1000);
+                if (pace < bestPace) { bestPace = pace; bestRun = r; }
+            });
+            if (bestRun) {
+                const targetDist = km * 1000;
+                const totalTime = bestRun.time * 1000;
+                const points = 20;
+                const synthTimeSeries = [];
+                for (let i = 1; i <= points; i++) {
+                    synthTimeSeries.push({
+                        distance: (targetDist / points) * i,
+                        time: (totalTime / points) * i
+                    });
+                }
+                bestRun = { ...bestRun, timeSeries: synthTimeSeries };
+                simulated = true;
+            }
+        }
+
+        if (!bestRun) { ghosts[km] = null; return; }
+
+        ghosts[km] = {
+            pace: bestPace,
+            timeSeries: bestRun.timeSeries,
+            distance: bestRun.distance,
+            time: bestRun.time,
+            date: new Date(bestRun.startTime).toLocaleDateString(),
+            simulated: simulated
+        };
+    });
+    return ghosts;
+}
+
+function getGhostDistanceAtTime(timeSeries, elapsedMs) {
+    if (!timeSeries || timeSeries.length === 0) return 0;
+    for (let i = 0; i < timeSeries.length; i++) {
+        if (timeSeries[i].time >= elapsedMs) {
+            if (i === 0) {
+                return timeSeries[0].distance > 0
+                    ? (elapsedMs / timeSeries[0].time) * timeSeries[0].distance : 0;
+            }
+            const prev = timeSeries[i - 1], next = timeSeries[i];
+            const ratio = (elapsedMs - prev.time) / (next.time - prev.time);
+            return prev.distance + ratio * (next.distance - prev.distance);
+        }
+    }
+    return timeSeries[timeSeries.length - 1].distance;
+}
+
+function getGhostTimeAtDistance(timeSeries, distance) {
+    if (!timeSeries || timeSeries.length === 0) return null;
+    for (let i = 0; i < timeSeries.length; i++) {
+        if (timeSeries[i].distance >= distance) {
+            if (i === 0) {
+                return timeSeries[0].distance > 0
+                    ? (distance / timeSeries[0].distance) * timeSeries[0].time : null;
+            }
+            const prev = timeSeries[i - 1], next = timeSeries[i];
+            const ratio = (distance - prev.distance) / (next.distance - prev.distance);
+            return prev.time + ratio * (next.time - prev.time);
+        }
+    }
+    return null;
+}
+
+function getGhostPositionAtTime(timeSeries, elapsedMs) {
+    if (!timeSeries || timeSeries.length === 0) return null;
+    const withCoords = timeSeries.filter(p => p.lat != null && p.lng != null);
+    if (withCoords.length === 0) return null;
+
+    for (let i = 0; i < withCoords.length; i++) {
+        if (withCoords[i].time >= elapsedMs) {
+            if (i === 0) return [withCoords[0].lat, withCoords[0].lng];
+            const prev = withCoords[i - 1], next = withCoords[i];
+            const ratio = (elapsedMs - prev.time) / (next.time - prev.time);
+            return [
+                prev.lat + ratio * (next.lat - prev.lat),
+                prev.lng + ratio * (next.lng - prev.lng)
+            ];
+        }
+    }
+    const last = withCoords[withCoords.length - 1];
+    return [last.lat, last.lng];
+}
+
+function renderGhostRaceTab() {
+    getAllRuns().then(runs => {
+        const ghosts = getBestRunsForGhost(runs);
+        const container = document.getElementById("ghost-race-content");
+        container.innerHTML = "";
+
+        const intro = document.createElement("p");
+        intro.className = "ghost-intro";
+        intro.textContent = "Race against your personal best! Select a distance to start a ghost race.";
+        container.appendChild(intro);
+
+        const grid = document.createElement("div");
+        grid.className = "ghost-grid";
+
+        [1, 3, 5, 10].forEach(km => {
+            const card = document.createElement("div");
+            card.className = "ghost-card";
+            if (ghosts[km]) {
+                card.classList.add("available");
+                const simLabel = ghosts[km].simulated
+                    ? '<div class="ghost-sim-badge">Simulated Ghost</div>' : '';
+                card.innerHTML = `
+                    <div class="ghost-card-icon">👻</div>
+                    <div class="ghost-distance">${km}K</div>
+                    ${simLabel}
+                    <div class="ghost-pace">${formatPace(ghosts[km].pace)} /km</div>
+                    <div class="ghost-time">${formatPace(ghosts[km].time)} total</div>
+                    <div class="ghost-date">${ghosts[km].date}</div>
+                    <button class="ghost-start-btn" data-km="${km}">Race Ghost</button>`;
+            } else {
+                card.classList.add("unavailable");
+                card.innerHTML = `
+                    <div class="ghost-card-icon">👻</div>
+                    <div class="ghost-distance">${km}K</div>
+                    <div class="ghost-pace">—</div>
+                    <div class="ghost-date">No qualifying run with tracking data</div>`;
+            }
+            grid.appendChild(card);
+        });
+
+        container.appendChild(grid);
+
+        const note = document.createElement("p");
+        note.className = "ghost-note";
+        note.textContent = "Ghost races use your best run's pace profile. Complete runs with GPS tracking to unlock ghost races.";
+        container.appendChild(note);
+
+        container.querySelectorAll(".ghost-start-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const km = parseInt(btn.dataset.km);
+                startGhostRaceMode(km, ghosts[km]);
+            });
+        });
+    });
 }
 
 function renderCourseProgress() {

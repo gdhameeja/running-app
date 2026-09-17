@@ -440,7 +440,7 @@ button:disabled {
 
 .pb-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 10px;
 }
 
@@ -522,6 +522,188 @@ button:disabled {
     font-size: 12px;
     color: #888;
     margin-top: 4px;
+}
+
+/* ═══ Ghost Race Tab ═══ */
+
+.ghost-intro {
+    color: #666;
+    font-size: 14px;
+    margin-bottom: 16px;
+}
+
+.ghost-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+}
+
+.ghost-card {
+    background: #f8f9fa;
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+    border: 1px solid #e8e8e8;
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.ghost-card.available {
+    cursor: pointer;
+}
+
+.ghost-card.available:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.ghost-card.unavailable {
+    opacity: 0.5;
+}
+
+.ghost-card-icon {
+    font-size: 32px;
+    margin-bottom: 4px;
+}
+
+.ghost-distance {
+    font-size: 22px;
+    font-weight: 700;
+    color: #3f51b5;
+}
+
+.ghost-pace {
+    font-size: 16px;
+    font-weight: 500;
+    color: #e91e63;
+    margin: 4px 0;
+}
+
+.ghost-time {
+    font-size: 13px;
+    color: #666;
+}
+
+.ghost-date {
+    font-size: 11px;
+    color: #999;
+    margin-bottom: 8px;
+}
+
+.ghost-start-btn {
+    padding: 8px 20px;
+    font-size: 13px;
+    background: #7c4dff;
+    border-radius: 20px;
+    margin-top: 4px;
+}
+
+.ghost-start-btn:hover {
+    background: #651fff;
+}
+
+.ghost-note {
+    font-size: 12px;
+    color: #999;
+    margin-top: 16px;
+    text-align: center;
+}
+
+.ghost-sim-badge {
+    font-size: 10px;
+    background: #fff3e0;
+    color: #e65100;
+    padding: 2px 8px;
+    border-radius: 8px;
+    display: inline-block;
+    margin-bottom: 4px;
+}
+
+.ghost-map-marker {
+    background: none;
+    border: none;
+}
+
+/* ═══ Ghost Comparison Panel (during run) ═══ */
+
+#ghost-panel {
+    background: linear-gradient(135deg, #4a148c, #7c4dff);
+    color: white;
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+.ghost-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    font-size: 15px;
+    font-weight: 500;
+}
+
+.ghost-emoji {
+    font-size: 24px;
+}
+
+.ghost-comparison {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+}
+
+.ghost-col {
+    flex: 1;
+    text-align: center;
+}
+
+.ghost-label {
+    font-size: 11px;
+    letter-spacing: 2px;
+    opacity: 0.7;
+    margin-bottom: 4px;
+}
+
+.ghost-stat {
+    font-size: 22px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.ghost-stat-small {
+    font-size: 14px;
+    opacity: 0.8;
+    margin-top: 2px;
+}
+
+.ghost-vs {
+    font-size: 16px;
+    font-weight: 700;
+    opacity: 0.5;
+}
+
+.ghost-diff-bar {
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    background: rgba(255,255,255,0.15);
+}
+
+.ghost-diff-bar.ahead {
+    background: rgba(76,175,80,0.3);
+}
+
+.ghost-diff-bar.behind {
+    background: rgba(244,67,54,0.3);
+}
+
+.ghost-diff-bar.tied {
+    background: rgba(255,235,59,0.2);
 }
 
 /* ═══ Guided Run Panel ═══ */
@@ -623,7 +805,7 @@ button:disabled {
     }
 
     .pb-grid {
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
         gap: 6px;
     }
 
