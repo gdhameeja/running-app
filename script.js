@@ -51,6 +51,9 @@ let gapLine = null;
 let autoSaveInterval = null;
 let ghostMarker = null;
 let lastTimeSeriesTime = 0;
+let lastRawFixTime = null;
+let estimatedDistance = 0;
+let hiddenDuringRunMs = 0;
 
 // ─── IndexedDB (v2: adds courseProgress store) ─────────────────────────────────
 
@@ -176,21 +179,6 @@ function findPreviousTime(timeSeries, currentDistance) {
     return null;
 }
 
-function compareWithPreviousRun(previousRunTimeSeries, currentDistance, currentTime) {
-    if (!previousRunTimeSeries) return;
-    const previousTime = findPreviousTime(previousRunTimeSeries, currentDistance);
-    if (previousTime === null) return;
-    const difference = previousTime - currentTime;
-    const formattedDifference = formatTime(Math.abs(difference));
-    if (difference > 0) {
-        speakText(`You are ${formattedDifference} faster than your last run at this distance.`);
-    } else if (difference < 0) {
-        speakText(`You are ${formattedDifference} slower than your last run at this distance.`);
-    } else {
-        speakText(`You are at the same pace as your last run.`);
-    }
-}
-
 function displayRunSummary(run) {
     const summaryElement = document.createElement("div");
     summaryElement.className = "run-summary";
@@ -200,6 +188,7 @@ function displayRunSummary(run) {
         <p>Distance: ${(run.distance / 1000).toFixed(2)} km</p>
         <p>Time: ${formatTime(Math.floor(run.time))}</p>
         <p>Average Pace: ${formatTime(Math.floor(run.pace))} /km</p>
+        ${run.estimatedDistance > 50 ? `<p class="summary-note">${(run.estimatedDistance / 1000).toFixed(2)} km was estimated in straight lines across GPS gaps (screen off or app in background), so the real distance is probably a little higher.</p>` : ""}
     `;
     const container = document.getElementById("tab-track");
     const existingSummary = container.querySelector(".run-summary");
@@ -269,7 +258,11 @@ function initTabs() {
 // ─── Run Tracking (start/pause/stop) ──────────────────────────────────────────
 
 document.getElementById("start").addEventListener("click", () => {
+    document.getElementById("start").disabled = true;
+    speechSynthesis.cancel();
     totalDistance = 0;
+    estimatedDistance = 0;
+    hiddenDuringRunMs = 0;
     prevPosition = null;
     nextMilestone = 1000;
     startTime = Date.now();
@@ -318,12 +311,16 @@ document.getElementById("start").addEventListener("click", () => {
             document.getElementById("pause").disabled = false;
             document.getElementById("start").disabled = true;
             document.getElementById("stop").disabled = false;
+            document.getElementById("lock-screen").disabled = false;
             requestWakeLock();
             startBackgroundAudio();
             watchId = startTracking();
             startAutoSave();
         })
-        .catch(error => console.error("Error starting run:", error));
+        .catch(error => {
+            console.error("Error starting run:", error);
+            document.getElementById("start").disabled = false;
+        });
 });
 
 document.getElementById("pause").addEventListener("click", () => {
@@ -338,6 +335,9 @@ document.getElementById("pause").addEventListener("click", () => {
     } else {
         startTime += (Date.now() - pausedTime);
         lastMilestoneTime += (Date.now() - pausedTime);
+        prevPosition = null;
+        kalmanLat = null;
+        kalmanLon = null;
         updateTimer();
         watchId = startTracking();
         isPaused = false;
@@ -352,7 +352,11 @@ document.getElementById("stop").addEventListener("click", () => {
     stopAutoSave();
     releaseWakeLock();
     stopBackgroundAudio();
+    hideLockOverlay();
+    updateGpsStatus(null);
+    watchId = null;
     if (ghostMarker) { map.removeLayer(ghostMarker); ghostMarker = null; }
+    document.getElementById("lock-screen").disabled = true;
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
     document.getElementById("pause").disabled = true;
@@ -388,6 +392,8 @@ document.getElementById("stop").addEventListener("click", () => {
                 runData.time = runTime;
                 runData.pace = pace;
                 runData.timeSeries = timeSeriesData;
+                runData.pathSegments = [...pathSegments, currentSegment];
+                runData.estimatedDistance = estimatedDistance;
                 updateRun(runData)
                     .then(() => displayRunSummary(runData))
                     .catch(error => console.error("Error updating run:", error));
@@ -399,7 +405,6 @@ document.getElementById("stop").addEventListener("click", () => {
 // ─── Utility ───────────────────────────────────────────────────────────────────
 
 function speakText(text) {
-    speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
     speechSynthesis.speak(utterance);
@@ -476,6 +481,7 @@ function autoSaveRun() {
             runData.pace = totalDistance > 0 ? (elapsed / (totalDistance / 1000)) : 0;
             runData.timeSeries = timeSeriesData;
             runData.pathSegments = [...pathSegments, currentSegment];
+            runData.estimatedDistance = estimatedDistance;
             store.put(runData);
         }
     };
@@ -483,6 +489,9 @@ function autoSaveRun() {
 
 function checkForInterruptedRun() {
     getAllRuns().then(runs => {
+        const tx = db.transaction(["runs"], "readwrite");
+        runs.filter(r => r.endTime === null && !(r.distance > 50))
+            .forEach(r => tx.objectStore("runs").delete(r.runId));
         const interrupted = runs.find(r => r.endTime === null && r.distance > 50);
         if (interrupted) {
             const dist = (interrupted.distance / 1000).toFixed(2);
@@ -502,19 +511,19 @@ function checkForInterruptedRun() {
 }
 
 document.addEventListener('visibilitychange', () => {
+    const running = watchId != null && !isPaused;
     if (document.hidden) {
         window._lastHiddenTime = Date.now();
-        if (currentRunId && !isPaused) autoSaveRun();
+        if (currentRunId && running) autoSaveRun();
     } else {
-        if (watchId && window._lastHiddenTime) {
-            const hiddenDuration = Date.now() - window._lastHiddenTime;
-            if (hiddenDuration > 5000) {
-                kalmanLat = null;
-                kalmanLon = null;
-                prevPosition = null;
+        if (running && window._lastHiddenTime) {
+            const hiddenMs = Date.now() - window._lastHiddenTime;
+            hiddenDuringRunMs += hiddenMs;
+            if (hiddenMs > GAP_THRESHOLD_MS) {
+                showToast(`Screen was off for ${formatTime(Math.round(hiddenMs / 1000))}. The browser pauses GPS while the screen is off, so that stretch is estimated as a straight line. Use the lock button instead of the power button to keep tracking accurately.`);
             }
         }
-        if (watchId) requestWakeLock();
+        if (running) requestWakeLock();
         if (bgAudioCtx && bgAudioCtx.state === 'suspended') {
             bgAudioCtx.resume().catch(() => {});
         }
@@ -522,6 +531,78 @@ document.addEventListener('visibilitychange', () => {
         delete window._lastHiddenTime;
     }
 });
+
+// ─── In-app lock (keeps the page visible so GPS keeps running) ────────────────
+
+let lockHoldTimer = null;
+
+function showLockOverlay() {
+    const overlay = document.getElementById("lock-overlay");
+    overlay.style.display = "flex";
+    updateLockOverlay();
+    if (overlay.requestFullscreen) overlay.requestFullscreen().catch(() => {});
+}
+
+function hideLockOverlay() {
+    document.getElementById("lock-overlay").style.display = "none";
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+}
+
+function updateLockOverlay() {
+    const overlay = document.getElementById("lock-overlay");
+    if (overlay.style.display !== "flex") return;
+    document.getElementById("lock-distance").textContent = (totalDistance / 1000).toFixed(2);
+    document.getElementById("lock-time").textContent = document.getElementById("time").textContent;
+    document.getElementById("lock-pace").textContent = document.getElementById("pace").textContent;
+    const ghostEl = document.getElementById("lock-ghost");
+    ghostEl.textContent = ghostRace ? document.getElementById("ghost-diff").textContent : "";
+    const grEl = document.getElementById("lock-guided");
+    grEl.textContent = guidedRun && guidedRun.currentSegmentIndex >= 0
+        ? `${document.getElementById("gr-segment-type").textContent} · ${document.getElementById("gr-time-remaining").textContent}`
+        : "";
+}
+
+document.getElementById("lock-screen").addEventListener("click", showLockOverlay);
+
+(function initLockOverlay() {
+    const overlay = document.getElementById("lock-overlay");
+    const hint = document.getElementById("lock-hint");
+    const startHold = (e) => {
+        e.preventDefault();
+        hint.textContent = "Keep holding…";
+        lockHoldTimer = setTimeout(() => {
+            hint.textContent = "Hold for 2 seconds to unlock";
+            hideLockOverlay();
+        }, 2000);
+    };
+    const cancelHold = () => {
+        clearTimeout(lockHoldTimer);
+        hint.textContent = "Hold for 2 seconds to unlock";
+    };
+    overlay.addEventListener("pointerdown", startHold);
+    overlay.addEventListener("pointerup", cancelHold);
+    overlay.addEventListener("pointercancel", cancelHold);
+    overlay.addEventListener("pointerleave", cancelHold);
+    overlay.addEventListener("contextmenu", e => e.preventDefault());
+})();
+
+// ─── Status helpers ────────────────────────────────────────────────────────────
+
+function updateGpsStatus(accuracy) {
+    const el = document.getElementById("gps-status");
+    if (accuracy == null) { el.textContent = ""; el.className = ""; return; }
+    const good = accuracy <= MAX_ACCURACY_M;
+    el.textContent = good ? `GPS ±${Math.round(accuracy)} m` : `Weak GPS ±${Math.round(accuracy)} m — waiting for a better signal`;
+    el.className = good ? "gps-good" : "gps-weak";
+}
+
+function showToast(text) {
+    const toast = document.getElementById("toast");
+    toast.textContent = text;
+    toast.style.display = "block";
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => { toast.style.display = "none"; }, 10000);
+}
 
 function updateTimer() {
     clearInterval(timerInterval);
@@ -533,6 +614,7 @@ function updateTimer() {
             document.getElementById("pace").textContent = `${formatTime(Math.floor(paceInSeconds))} /km`;
         }
         if (ghostRace) updateGhostPanel();
+        updateLockOverlay();
     }, 1000);
 }
 
@@ -553,141 +635,175 @@ function getDistance(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-function startTracking() {
-    return navigator.geolocation.watchPosition(position => {
-        const accuracy = position.coords.accuracy;
+// Chrome/Safari stop delivering GPS to a page that isn't visible (screen off or
+// app switched), so a gap between fixes is normal. Rather than throwing away the
+// distance covered during a gap, bridge it with a straight line (an underestimate
+// on curvy routes, but far better than zero) as long as the implied speed is
+// plausible for running.
+const GAP_THRESHOLD_MS = 10000;
+const MAX_SPEED_MPS = 12.5;
+const MAX_ACCURACY_M = 20;
 
-        if (accuracy > 20) return;
+function classifyFix(prev, curr) {
+    const dist = getDistance(prev.lat, prev.lon, curr.lat, curr.lon);
+    const dt = (curr.time - prev.time) / 1000;
+    const isGap = curr.time - prev.lastRawTime > GAP_THRESHOLD_MS;
+    if (dt > 0 && dist / dt > MAX_SPEED_MPS) return { action: "reject", dist, dt, isGap };
+    if (!isGap && dist < 3) return { action: "skip", dist, dt, isGap };
+    return { action: "accept", dist, dt, isGap };
+}
+
+function startTracking() {
+    lastRawFixTime = null;
+    return navigator.geolocation.watchPosition(position => {
+        const now = Date.now();
+        const accuracy = position.coords.accuracy;
+        const rawGapStart = lastRawFixTime;
+        lastRawFixTime = now;
+        updateGpsStatus(accuracy);
+
+        if (accuracy > MAX_ACCURACY_M) return;
 
         let { latitude, longitude } = position.coords;
 
         if (!kalmanLat) {
             kalmanLat = new KalmanFilter(0.0001, latitude);
             kalmanLon = new KalmanFilter(0.0001, longitude);
-            lastFixTime = Date.now();
         }
 
         latitude = kalmanLat.update(latitude, accuracy);
         longitude = kalmanLon.update(longitude, accuracy);
 
-        if (prevPosition) {
-            const dist = getDistance(prevPosition.lat, prevPosition.lon, latitude, longitude);
-
-            if (dist < 3) return;
-
-            const now = Date.now();
-            const timeDelta = (now - lastFixTime) / 1000;
-
-            if (timeDelta > 10 && currentSegment.length > 0) {
-                pathSegments.push([...currentSegment]);
-                gapCoords.push([
-                    currentSegment[currentSegment.length - 1],
-                    [latitude, longitude]
-                ]);
-                gapLine.setLatLngs(gapCoords);
-                currentSegment = [[latitude, longitude]];
-                pathLine.setLatLngs([...pathSegments, currentSegment]);
-                prevPosition = { lat: latitude, lon: longitude };
-                lastFixTime = now;
-                kalmanLat = new KalmanFilter(0.0001, latitude);
-                kalmanLon = new KalmanFilter(0.0001, longitude);
-                userMarker.setLatLng([latitude, longitude]);
-                map.setView([latitude, longitude]);
-                return;
-            }
-
-            if (timeDelta > 0 && (dist / timeDelta) > 12.5) return;
+        if (!prevPosition) {
+            // First fix of the run, or first fix after resuming from pause
             lastFixTime = now;
-
-            totalDistance += dist;
-            document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
-
-            currentSegment.push([latitude, longitude]);
-            pathLine.setLatLngs([...pathSegments, currentSegment]);
-            userMarker.setLatLng([latitude, longitude]);
-            map.setView([latitude, longitude]);
-
-            const currentTimeMs = Date.now() - startTime;
-            const instantPace = timeDelta > 0 && dist > 0
-                ? (timeDelta / (dist / 1000)) : 0;
-
-            if (totalDistance - lastTimeSeriesDistance >= timeSeriesInterval) {
-                const dataPoint = {
-                    distance: Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval,
-                    time: currentTimeMs,
-                    lat: latitude,
-                    lng: longitude,
-                    pace: instantPace
-                };
-                timeSeriesData.push(dataPoint);
-
-                if (window.previousRunTimeSeries) {
-                    compareWithPreviousRun(window.previousRunTimeSeries, dataPoint.distance, currentTimeMs);
-                }
-
-                lastTimeSeriesDistance = Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval;
-            }
-
-            if (currentTimeMs - lastTimeSeriesTime >= 60000) {
-                const alreadyRecorded = timeSeriesData.length > 0 &&
-                    Math.abs(timeSeriesData[timeSeriesData.length - 1].time - currentTimeMs) < 5000;
-                if (!alreadyRecorded) {
-                    timeSeriesData.push({
-                        distance: totalDistance,
-                        time: currentTimeMs,
-                        lat: latitude,
-                        lng: longitude,
-                        pace: instantPace
-                    });
-                }
-                lastTimeSeriesTime = currentTimeMs;
-            }
-
-            if (totalDistance >= nextMilestone) {
-                let now2 = Date.now();
-                let timeTaken = ((now2 - lastMilestoneTime) / 1000).toFixed(0);
-                speakText(`You've completed ${nextMilestone / 1000} kilometer in ${formatTime(timeTaken)}.`);
-
-                if (ghostRace && typeof getGhostTimeAtDistance === "function") {
-                    const ghostTimeMs = getGhostTimeAtDistance(ghostRace.ghostTimeSeries, nextMilestone);
-                    const yourTimeMs = now2 - startTime;
-                    if (ghostTimeMs !== null) {
-                        const diffSec = Math.round(Math.abs(ghostTimeMs - yourTimeMs) / 1000);
-                        const diffStr = formatTime(diffSec);
-                        if (yourTimeMs < ghostTimeMs) {
-                            setTimeout(() => speakText(`${diffStr} ahead of your ghost.`), 2500);
-                        } else if (yourTimeMs > ghostTimeMs) {
-                            setTimeout(() => speakText(`${diffStr} behind your ghost.`), 2500);
-                        }
-                    }
-                }
-
-                nextMilestone += 1000;
-                lastMilestoneTime = now2;
-            }
-        } else {
-            lastFixTime = Date.now();
             if (currentSegment.length > 0) {
                 pathSegments.push([...currentSegment]);
-                gapCoords.push([
-                    currentSegment[currentSegment.length - 1],
-                    [latitude, longitude]
-                ]);
-                gapLine.setLatLngs(gapCoords);
                 currentSegment = [];
             }
             currentSegment.push([latitude, longitude]);
             pathLine.setLatLngs([...pathSegments, currentSegment]);
             userMarker.setLatLng([latitude, longitude]);
             map.setView([latitude, longitude]);
+            prevPosition = { lat: latitude, lon: longitude };
+            return;
+        }
+
+        const fix = classifyFix(
+            { lat: prevPosition.lat, lon: prevPosition.lon, time: lastFixTime, lastRawTime: rawGapStart ?? lastFixTime },
+            { lat: latitude, lon: longitude, time: now }
+        );
+
+        if (fix.action === "skip") return;
+        if (fix.action === "reject") {
+            // After a long gap a bad first fix could otherwise poison every later
+            // one; start a fresh segment without counting distance.
+            if (fix.isGap) {
+                pathSegments.push([...currentSegment]);
+                currentSegment = [[latitude, longitude]];
+                prevPosition = { lat: latitude, lon: longitude };
+                lastFixTime = now;
+                kalmanLat = new KalmanFilter(0.0001, latitude);
+                kalmanLon = new KalmanFilter(0.0001, longitude);
+            }
+            return;
+        }
+
+        const dist = fix.dist;
+        const timeDelta = fix.dt;
+        lastFixTime = now;
+
+        if (fix.isGap && currentSegment.length > 0) {
+            pathSegments.push([...currentSegment]);
+            gapCoords.push([currentSegment[currentSegment.length - 1], [latitude, longitude]]);
+            gapLine.setLatLngs(gapCoords);
+            currentSegment = [[latitude, longitude]];
+            estimatedDistance += dist;
+            kalmanLat = new KalmanFilter(0.0001, latitude);
+            kalmanLon = new KalmanFilter(0.0001, longitude);
+        } else {
+            currentSegment.push([latitude, longitude]);
         }
         prevPosition = { lat: latitude, lon: longitude };
+
+        totalDistance += dist;
+        document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
+        pathLine.setLatLngs([...pathSegments, currentSegment]);
+        userMarker.setLatLng([latitude, longitude]);
+        map.setView([latitude, longitude]);
+
+        const currentTimeMs = now - startTime;
+        const instantPace = timeDelta > 0 && dist > 0 ? (timeDelta / (dist / 1000)) : 0;
+
+        if (totalDistance - lastTimeSeriesDistance >= timeSeriesInterval) {
+            timeSeriesData.push({
+                distance: Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval,
+                time: currentTimeMs,
+                lat: latitude,
+                lng: longitude,
+                pace: instantPace
+            });
+            lastTimeSeriesDistance = Math.floor(totalDistance / timeSeriesInterval) * timeSeriesInterval;
+        }
+
+        if (currentTimeMs - lastTimeSeriesTime >= 60000) {
+            const alreadyRecorded = timeSeriesData.length > 0 &&
+                Math.abs(timeSeriesData[timeSeriesData.length - 1].time - currentTimeMs) < 5000;
+            if (!alreadyRecorded) {
+                timeSeriesData.push({
+                    distance: totalDistance,
+                    time: currentTimeMs,
+                    lat: latitude,
+                    lng: longitude,
+                    pace: instantPace
+                });
+            }
+            lastTimeSeriesTime = currentTimeMs;
+        }
+
+        if (totalDistance >= nextMilestone) announceMilestone(now);
+
+        // Timers are throttled while the page is hidden, so also drive the ghost
+        // panel from GPS fixes to catch the finish line promptly.
+        if (ghostRace) updateGhostPanel();
     }, (error) => {
         console.error("Geolocation error:", error);
         if (error.code === error.PERMISSION_DENIED) {
             alert("Location permission denied. Please enable location access to track your run.");
         }
     }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+
+function announceMilestone(now) {
+    // A gap can cross several kilometres at once; announce only the latest.
+    const km = Math.floor(totalDistance / 1000);
+    const splitSec = Math.round((now - lastMilestoneTime) / 1000);
+    const kmCovered = km - (nextMilestone / 1000) + 1;
+    let msg = kmCovered > 1
+        ? `${km} kilometers. ${formatTime(Math.round((now - startTime) / 1000))} elapsed.`
+        : `You've completed ${km} kilometer${km > 1 ? "s" : ""} in ${formatTime(splitSec)}.`;
+
+    if (ghostRace) {
+        const ghostTimeMs = getGhostTimeAtDistance(ghostRace.ghostTimeSeries, km * 1000);
+        const yourTimeMs = now - startTime;
+        if (ghostTimeMs !== null) {
+            const diffStr = formatTime(Math.round(Math.abs(ghostTimeMs - yourTimeMs) / 1000));
+            if (yourTimeMs < ghostTimeMs) msg += ` ${diffStr} ahead of your ghost.`;
+            else if (yourTimeMs > ghostTimeMs) msg += ` ${diffStr} behind your ghost.`;
+        }
+    } else if (window.previousRunTimeSeries) {
+        const previousTime = findPreviousTime(window.previousRunTimeSeries, km * 1000);
+        if (previousTime !== null) {
+            const diff = previousTime - (now - startTime);
+            const diffStr = formatTime(Math.round(Math.abs(diff) / 1000));
+            if (diff > 0) msg += ` ${diffStr} faster than your last run.`;
+            else if (diff < 0) msg += ` ${diffStr} slower than your last run.`;
+        }
+    }
+
+    speakText(msg);
+    nextMilestone = (km + 1) * 1000;
+    lastMilestoneTime = now;
 }
 
 // ─── Ghost Race ───────────────────────────────────────────────────────────────
@@ -764,7 +880,8 @@ function updateGhostPanel() {
     const diff = totalDistance - ghostDist;
     const diffEl = document.getElementById("ghost-diff");
 
-    if (yourFinished && !ghostRace.finished) {
+    if (ghostRace.finished) return;
+    if (yourFinished) {
         ghostRace.finished = true;
         const ghostTimeMs = getGhostTimeAtDistance(ghostRace.ghostTimeSeries, targetDist);
         if (ghostTimeMs !== null && elapsedMs < ghostTimeMs) {
@@ -1169,7 +1286,7 @@ function startGuidedRun(courseId, levelKey, sessionIndex) {
     });
 }
 
-function startSegment(index) {
+function startSegment(index, scheduledStart = Date.now()) {
     if (!guidedRun) return;
     if (index >= guidedRun.segments.length) {
         completeGuidedRun();
@@ -1177,15 +1294,18 @@ function startSegment(index) {
     }
 
     guidedRun.currentSegmentIndex = index;
-    guidedRun.segmentStartTime = Date.now();
+    guidedRun.segmentStartTime = scheduledStart;
     guidedRun.segmentPausedElapsed = 0;
     guidedRun.announcedWarnings = {};
 
     const seg = guidedRun.segments[index];
     const durationSec = Math.round(seg.duration * 60);
 
-    announceSegment(seg, durationSec);
+    // When catching up after throttled timers, skip segments that already ended
+    if (Date.now() < scheduledStart + durationSec * 1000) announceSegment(seg, durationSec);
     updateGuidedRunUI();
+    // updateGuidedRunUI may already have advanced past this segment
+    if (!guidedRun || guidedRun.currentSegmentIndex !== index || guidedRun.completing) return;
 
     clearInterval(guidedRun.segmentInterval);
     guidedRun.segmentInterval = setInterval(() => updateGuidedRunUI(), 500);
@@ -1260,7 +1380,8 @@ function updateGuidedRunUI() {
 
     if (remaining <= 0) {
         clearInterval(guidedRun.segmentInterval);
-        startSegment(guidedRun.currentSegmentIndex + 1);
+        const segEnd = guidedRun.segmentStartTime + (durationSec + guidedRun.segmentPausedElapsed) * 1000;
+        startSegment(guidedRun.currentSegmentIndex + 1, segEnd);
     }
 }
 
@@ -1278,7 +1399,8 @@ function resumeGuidedRun() {
 }
 
 function completeGuidedRun() {
-    if (!guidedRun) return;
+    if (!guidedRun || guidedRun.completing) return;
+    guidedRun.completing = true;
     clearInterval(guidedRun.segmentInterval);
 
     speakText("Workout complete! Great job!");

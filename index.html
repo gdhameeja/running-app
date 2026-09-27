@@ -63,6 +63,8 @@
             <button id="start"><span class="material-icons">play_arrow</span></button>
             <button id="pause" disabled><span class="material-icons">pause</span></button>
             <button id="stop" disabled><span class="material-icons">stop</span></button>
+            <button id="lock-screen" disabled title="Lock screen (keeps GPS running)"><span class="material-icons">lock</span></button>
+            <p id="gps-status"></p>
             <button id="showPreviousRuns">Show Previous Runs</button>
             <div id="previousRunsSection" style="display:none; margin-top:20px;">
                 <label for="pageSizeSelect">Runs per page:</label>
@@ -157,6 +159,16 @@
             </div>
         </div>
     </div>
+
+    <!-- In-app lock: black screen that ignores touches, so the page stays visible and GPS keeps working -->
+    <div id="lock-overlay" style="display:none;">
+        <div class="lock-distance"><span id="lock-distance">0.00</span> km</div>
+        <div class="lock-row"><span id="lock-time">0:00</span> · <span id="lock-pace">0:00 /km</span></div>
+        <div class="lock-row" id="lock-guided"></div>
+        <div class="lock-row" id="lock-ghost"></div>
+        <div class="lock-hint"><span class="material-icons">lock</span> <span id="lock-hint">Hold for 2 seconds to unlock</span></div>
+    </div>
+    <div id="toast" style="display:none;"></div>
 
     <script src="courses.js"></script>
     <script src="script.js"></script>

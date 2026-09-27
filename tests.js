@@ -299,6 +299,57 @@ console.log("\n=== Haversine Distance Tests ===\n");
     assertApprox(d, 10, 2, "Small lat change ~10m");
 })();
 
+// ─── GPS Fix Classification Tests ────────────────────────────────────────────
+
+console.log("\n=== GPS Fix Classification Tests ===\n");
+
+const GAP_THRESHOLD_MS = 10000;
+const MAX_SPEED_MPS = 12.5;
+
+function classifyFix(prev, curr) {
+    const dist = getDistance(prev.lat, prev.lon, curr.lat, curr.lon);
+    const dt = (curr.time - prev.time) / 1000;
+    const isGap = curr.time - prev.lastRawTime > GAP_THRESHOLD_MS;
+    if (dt > 0 && dist / dt > MAX_SPEED_MPS) return { action: "reject", dist, dt, isGap };
+    if (!isGap && dist < 3) return { action: "skip", dist, dt, isGap };
+    return { action: "accept", dist, dt, isGap };
+}
+
+// ~0.000009 deg latitude per metre
+(function testNormalFix() {
+    const r = classifyFix({ lat: 12.97, lon: 77.59, time: 0, lastRawTime: 0 },
+                          { lat: 12.97 + 0.000009 * 3.5, lon: 77.59, time: 1000 });
+    assert(r.action === "accept" && !r.isGap, "3.5m in 1s: accepted, not a gap");
+})();
+
+(function testJitterSkipped() {
+    const r = classifyFix({ lat: 12.97, lon: 77.59, time: 0, lastRawTime: 0 },
+                          { lat: 12.97 + 0.000009, lon: 77.59, time: 1000 });
+    assert(r.action === "skip", "1m jitter: skipped");
+})();
+
+(function testScreenOffGapBridged() {
+    // Screen off for 3 minutes, ran ~540m (3:00/km-ish would be 1km; this is 5:33/km)
+    const r = classifyFix({ lat: 12.97, lon: 77.59, time: 0, lastRawTime: 0 },
+                          { lat: 12.97 + 0.000009 * 540, lon: 77.59, time: 180000 });
+    assert(r.action === "accept", "3-minute gap at running speed: distance kept");
+    assert(r.isGap, "3-minute gap: flagged as gap");
+    assertApprox(r.dist, 540, 10, "3-minute gap: straight-line distance ~540m");
+})();
+
+(function testTeleportRejected() {
+    const r = classifyFix({ lat: 12.97, lon: 77.59, time: 0, lastRawTime: 0 },
+                          { lat: 12.97 + 0.000009 * 500, lon: 77.59, time: 5000 });
+    assert(r.action === "reject", "500m in 5s: rejected as GPS glitch");
+})();
+
+(function testStandingStillWithWeakFixesNotGap() {
+    // Last accepted fix 30s ago, but weak fixes kept arriving (last raw 1s ago)
+    const r = classifyFix({ lat: 12.97, lon: 77.59, time: 0, lastRawTime: 29000 },
+                          { lat: 12.97 + 0.000009 * 60, lon: 77.59, time: 30000 });
+    assert(r.action === "accept" && !r.isGap, "Weak-signal stretch: distance kept, drawn solid");
+})();
+
 // ─── Summary ─────────────────────────────────────────────────────────────────
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
