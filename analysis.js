@@ -416,8 +416,18 @@ const RunAnalysis = (() => {
 
     // ─── Formatting / parsing ────────────────────────────────────────────────
 
-    // "24:59" or "1:05:00" to ms; null if it doesn't parse.
+    // "24:59" or "1:05:00" to ms; null if it doesn't parse. Phone number pads
+    // have no ":", so digits alone work too: "25" is 25:00, "2459" is 24:59,
+    // "10500" is 1:05:00.
     function parseDuration(text) {
+        const digits = /^\s*(\d{1,6})\s*$/.exec(text || "");
+        if (digits) {
+            const d = digits[1];
+            if (d.length <= 2) return +d > 0 ? +d * 60000 : null;
+            const s = +d.slice(-2), min = +d.slice(-4, -2), h = d.length > 4 ? +d.slice(0, -4) : 0;
+            if (s >= 60 || (h && min >= 60)) return null;
+            return ((h * 60 + min) * 60 + s) * 1000;
+        }
         const m = /^\s*(?:(\d+):)?(\d{1,3}):(\d{2})\s*$/.exec(text || "");
         if (!m) return null;
         const h = +(m[1] || 0), min = +m[2], s = +m[3];

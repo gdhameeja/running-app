@@ -613,11 +613,29 @@ function straightTrack(totalM, speed = 4, stopAt = null, stopMs = 0, lng = 77.59
 
 (function testParsing() {
     assert(RA.parseDuration("24:59") === 1499000 && RA.parseDuration("1:05:00") === 3900000, "Parses mm:ss and h:mm:ss");
-    assert(RA.parseDuration("25") === null && RA.parseDuration("24:75") === null, "Rejects bad times");
+    assert(RA.parseDuration("24:75") === null && RA.parseDuration("abc") === null && RA.parseDuration("") === null, "Rejects bad times");
+    assert(RA.parseDuration("25") === 1500000 && RA.parseDuration("2459") === 1499000 && RA.parseDuration("245") === 165000,
+        "Digits only (number pad): 25 = 25:00, 2459 = 24:59, 245 = 2:45");
+    assert(RA.parseDuration("10500") === 3900000 && RA.parseDuration("14500") === 6300000 && RA.parseDuration("2475") === null,
+        "Digits only with hours: 10500 = 1:05:00; 2475 rejected");
     assert(RA.formatDistance(5000) === "5K" && RA.formatDistance(5230) === "5.23 km", "Distance labels");
     const runs = [{ endTime: 1, startTime: 1000, distance: 10000, time: 3000 }];
     assertApprox(RA.fiveKPace(runs, 2000), 3000 * Math.pow(0.5, 1.06) / 5, 0.01, "Riegel 5K pace from a 10K");
 })();
+
+// ─── Pace Formatting ─────────────────────────────────────────────────────────
+
+console.log("\n=== Pace Formatting Tests ===\n");
+
+function formatPace(totalSeconds) {
+    const total = Math.round(totalSeconds);
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+assert(formatPace(299.8) === "5:00", "299.8 s rounds up to 5:00, not 4:60");
+assert(formatPace(299.4) === "4:59" && formatPace(61) === "1:01", "Ordinary paces");
 
 // ─── Summary ─────────────────────────────────────────────────────────────────
 

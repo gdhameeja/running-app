@@ -70,8 +70,10 @@ function estimateVO2max(runs) {
 }
 
 function formatPace(totalSeconds) {
-    const mins = Math.floor(totalSeconds / 60);
-    const secs = Math.round(totalSeconds % 60);
+    // Round first, or 299.8 s would show as "4:60"
+    const total = Math.round(totalSeconds);
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
     return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 

@@ -136,10 +136,10 @@ function renderGhostRaceTab() {
                             <input id="gr-custom-km" type="number" min="0.2" max="100" step="0.1" inputmode="decimal" placeholder="7.5">
                         </label>
                         <label>Time
-                            <input id="gr-target-time" type="text" inputmode="numeric" placeholder="25:00" autocomplete="off">
+                            <input id="gr-target-time" type="text" inputmode="numeric" placeholder="2500" autocomplete="off" enterkeyhint="done">
                         </label>
                     </div>
-                    <div class="gr-target-pace" id="gr-target-pace">Enter a time like 24:59 or 1:45:00</div>
+                    <div class="gr-target-pace" id="gr-target-pace">Type the time, e.g. 2459 for 24:59</div>
                     <div class="gr-chips" id="gr-target-chips"></div>
                     <button class="ghost-start-btn" id="gr-target-start" disabled>Race this target</button>
                     <p class="gr-note">The ghost runs an even pace all the way.</p>
@@ -205,14 +205,19 @@ function initTargetForm(ghosts) {
         const ms = RunAnalysis.parseDuration(timeIn.value);
         btn.disabled = true;
         if (!(m >= 200 && m <= 100000)) { paceEl.textContent = "Pick a distance between 0.2 and 100 km"; return; }
-        if (ms == null) { paceEl.textContent = "Enter a time like 24:59 or 1:45:00"; paceEl.className = "gr-target-pace"; return; }
+        if (ms == null) {
+            paceEl.textContent = timeIn.value.trim() ? "That isn't a time. Try 2459 for 24:59 or 14500 for 1:45:00" : "Type the time, e.g. 2459 for 24:59";
+            paceEl.className = "gr-target-pace" + (timeIn.value.trim() ? " bad" : "");
+            return;
+        }
         const pace = ms / 1000 / (m / 1000);
+        const asTime = formatDurationLabel(ms);
         if (pace < 150 || pace > 1200) {
-            paceEl.textContent = `That's ${formatPace(pace)} /km. Pick something between 2:30 and 20:00 /km.`;
+            paceEl.textContent = `${asTime} is ${formatPace(pace)} /km. Pick something between 2:30 and 20:00 /km.`;
             paceEl.className = "gr-target-pace bad";
             return;
         }
-        paceEl.textContent = `Ghost pace: ${formatPace(pace)} /km`;
+        paceEl.textContent = `${RunAnalysis.formatDistance(m)} in ${asTime}: ghost pace ${formatPace(pace)} /km`;
         paceEl.className = "gr-target-pace";
         btn.disabled = false;
     }
