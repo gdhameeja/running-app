@@ -55,6 +55,7 @@
                     </div>
                 </div>
                 <div class="ghost-diff-bar" id="ghost-diff">Starting...</div>
+                <button id="ar-open" class="ghost-ar-btn"><span class="material-icons">view_in_ar</span> See your ghost (AR)</button>
             </div>
             <div id="map"></div>
             <p>Distance: <span id="distance">0.00 kms</span></p>
@@ -168,10 +169,60 @@
         <div class="lock-row" id="lock-ghost"></div>
         <div class="lock-hint"><span class="material-icons">lock</span> <span id="lock-hint">Hold for 2 seconds to unlock</span></div>
     </div>
+    <!-- AR ghost view (ar-ghost.js) -->
+    <div id="ar-overlay" style="display:none;">
+        <video id="ar-video" playsinline muted autoplay></video>
+        <div id="ar-camera-msg"></div>
+        <div id="ar-shadow"></div>
+        <div id="ar-ghost"><div class="ar-ghost-body">👻</div></div>
+        <div id="ar-ghost-tag"></div>
+        <div id="ar-edge"><span class="material-icons">arrow_forward</span></div>
+        <div id="ar-edge-label"></div>
+        <div class="ar-top">
+            <button id="ar-close" class="ar-icon-btn" aria-label="Close AR view"><span class="material-icons">close</span></button>
+            <div class="ar-gap-card" id="ar-gap-card">
+                <div class="ar-gap-main" id="ar-gap">--</div>
+                <div class="ar-gap-sub" id="ar-gap-sub"></div>
+            </div>
+            <div class="ar-stats">
+                <div class="ar-stat">
+                    <span class="ar-stat-label">YOU</span>
+                    <span class="ar-stat-value" id="ar-you-dist">0.00 km</span>
+                    <span class="ar-stat-small" id="ar-you-pace">--:-- /km</span>
+                </div>
+                <div class="ar-stat">
+                    <span class="ar-stat-label">GHOST</span>
+                    <span class="ar-stat-value" id="ar-ghost-dist">0.00 km</span>
+                    <span class="ar-stat-small" id="ar-ghost-pace">--:-- /km</span>
+                </div>
+            </div>
+            <div class="ar-track">
+                <div class="ar-track-line"></div>
+                <div class="ar-track-dot ghost" id="ar-track-ghost">👻</div>
+                <div class="ar-track-dot you" id="ar-track-you"></div>
+                <span class="ar-track-end" id="ar-track-end"></span>
+            </div>
+            <div id="ar-status"></div>
+        </div>
+        <div id="ar-banner"></div>
+        <div class="ar-bottom">
+            <canvas id="ar-radar"></canvas>
+            <div id="ar-chips"></div>
+            <button id="ar-align" class="ar-icon-btn ar-align" aria-label="Align compass with running direction">
+                <span class="material-icons">explore</span><small>Align</small>
+            </button>
+        </div>
+    </div>
     <div id="toast" style="display:none;"></div>
 
     <script src="courses.js"></script>
+    <script src="analysis.js"></script>
+    <script src="native-tracker.js"></script>
     <script src="script.js"></script>
     <script src="performance.js"></script>
+    <script src="ghost-race.js"></script>
+    <script src="run-detail.js"></script>
+    <script src="ar-math.js"></script>
+    <script src="ar-ghost.js"></script>
 </body>
 </html>

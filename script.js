@@ -54,6 +54,10 @@ let lastTimeSeriesTime = 0;
 let lastRawFixTime = null;
 let estimatedDistance = 0;
 let hiddenDuringRunMs = 0;
+// One entry per accepted GPS fix: [moving ms, metres, lat, lng, speed m/s|null, bearing °|null]
+let trackData = [];
+// Latest speed/bearing reported by the GPS receiver itself (Doppler), for the AR ghost view
+let lastGpsMotion = null;
 
 // ─── IndexedDB (v2: adds courseProgress store) ─────────────────────────────────
 
@@ -115,6 +119,15 @@ function getAllRuns() {
         const req = store.getAll();
         req.onsuccess = () => resolve(req.result);
         req.onerror = (e) => reject("Error retrieving runs: " + e.target.error);
+    });
+}
+
+function getRunById(runId) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(["runs"], "readonly");
+        const req = tx.objectStore("runs").get(runId);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = (e) => reject("Error retrieving run: " + e.target.error);
     });
 }
 
@@ -189,11 +202,32 @@ function displayRunSummary(run) {
         <p>Time: ${formatTime(Math.floor(run.time))}</p>
         <p>Average Pace: ${formatTime(Math.floor(run.pace))} /km</p>
         ${run.estimatedDistance > 50 ? `<p class="summary-note">${(run.estimatedDistance / 1000).toFixed(2)} km was estimated in straight lines across GPS gaps (screen off or app in background), so the real distance is probably a little higher.</p>` : ""}
+        <p class="summary-extra"></p>
+        <button class="btn-small summary-details">View details</button>
     `;
     const container = document.getElementById("tab-track");
     const existingSummary = container.querySelector(".run-summary");
     if (existingSummary) existingSummary.remove();
     container.appendChild(summaryElement);
+    summaryElement.querySelector(".summary-details").addEventListener("click", () => openRunDetail(run.runId));
+
+    // Route ranking and workout result, once the other runs are loaded
+    getAllRuns().then(all => {
+        const runs = all.filter(r => r.endTime);
+        const lines = [];
+        const r = routeFor(findRoutes(runs), run.runId);
+        if (r) {
+            const n = r.route.ranked.entries.length;
+            lines.push(r.rank === 1
+                ? `🥇 Fastest of ${n} runs on ${escapeHtml(r.route.name)}!`
+                : `${ordinal(r.rank)} of ${n} on ${escapeHtml(r.route.name)} (best ${formatTime(Math.round(r.route.ranked.entries[0].timeMs / 1000))})`);
+        }
+        if (run.guided) {
+            const rep = RunAnalysis.guidedReport(run, run.guided, RunAnalysis.fiveKPace(runs, run.startTime));
+            if (rep && rep.judged) lines.push(`Workout: ${rep.onTarget} of ${rep.judged} segments on target.`);
+        }
+        summaryElement.querySelector(".summary-extra").innerHTML = lines.join("<br>");
+    }).catch(() => {});
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────
@@ -204,6 +238,9 @@ document.addEventListener("DOMContentLoaded", () => {
             initMap();
             initTabs();
             renderCourseGrid();
+            return NativeTracker.available ? resumeNativeSession() : null;
+        })
+        .then(() => {
             checkForInterruptedRun();
         })
         .catch(error => console.error("Failed to initialize database:", error));
@@ -259,7 +296,7 @@ function initTabs() {
 
 document.getElementById("start").addEventListener("click", () => {
     document.getElementById("start").disabled = true;
-    speechSynthesis.cancel();
+    if (window.speechSynthesis) speechSynthesis.cancel();
     totalDistance = 0;
     estimatedDistance = 0;
     hiddenDuringRunMs = 0;
@@ -272,6 +309,8 @@ document.getElementById("start").addEventListener("click", () => {
     gapCoords = [];
     elapsedTime = 0;
     timeSeriesData = [];
+    trackData = [];
+    lastGpsMotion = null;
     lastTimeSeriesDistance = 0;
     lastTimeSeriesTime = 0;
 
@@ -297,7 +336,13 @@ document.getElementById("start").addEventListener("click", () => {
                 distance: 0,
                 time: 0,
                 pace: 0,
-                timeSeries: []
+                timeSeries: [],
+                // What this run was racing / following, for the run detail page
+                ghost: ghostRace ? Object.assign({ label: ghostRace.label }, ghostRace.spec) : null,
+                guided: guidedRun ? {
+                    courseId: guidedRun.courseId, level: guidedRun.level, sessionIndex: guidedRun.sessionIndex,
+                    title: guidedRun.session.title, segments: guidedRun.segments,
+                } : null,
             });
         })
         .then(() => {
@@ -312,18 +357,34 @@ document.getElementById("start").addEventListener("click", () => {
             document.getElementById("start").disabled = true;
             document.getElementById("stop").disabled = false;
             document.getElementById("lock-screen").disabled = false;
+            if (NativeTracker.available) {
+                // The Android service tracks GPS and speaks cues even with the screen locked
+                nativeRun = true;
+                return startNativeRun();
+            }
             requestWakeLock();
             startBackgroundAudio();
             watchId = startTracking();
-            startAutoSave();
         })
+        .then(() => startAutoSave())
         .catch(error => {
             console.error("Error starting run:", error);
+            if (nativeRun) {
+                alert(error && error.code === "PERMISSION_DENIED"
+                    ? "Location permission denied. Please enable location access to track your run."
+                    : "Could not start the run: " + (error && error.message || error));
+                nativeRun = false;
+                db.transaction(["runs"], "readwrite").objectStore("runs").delete(currentRunId);
+                currentRunId = null;
+                endRun(Date.now());
+                return;
+            }
             document.getElementById("start").disabled = false;
         });
 });
 
 document.getElementById("pause").addEventListener("click", () => {
+    if (nativeRun) return nativePauseToggle();
     const pauseButton = document.getElementById("pause");
     if (!isPaused) {
         navigator.geolocation.clearWatch(watchId);
@@ -347,7 +408,13 @@ document.getElementById("pause").addEventListener("click", () => {
 });
 
 document.getElementById("stop").addEventListener("click", () => {
+    if (nativeRun) return nativeStop();
     navigator.geolocation.clearWatch(watchId);
+    endRun(Date.now());
+});
+
+// Resets the run UI and saves the finished run. Returns a promise.
+function endRun(endTime) {
     clearInterval(timerInterval);
     stopAutoSave();
     releaseWakeLock();
@@ -362,7 +429,7 @@ document.getElementById("stop").addEventListener("click", () => {
     document.getElementById("pause").disabled = true;
     document.getElementById("pause").innerHTML = '<span class="material-icons">pause</span>';
 
-    if (isPaused) startTime += (Date.now() - pausedTime);
+    if (isPaused) startTime += (endTime - pausedTime);
     isPaused = false;
 
     if (ghostRace) {
@@ -376,35 +443,31 @@ document.getElementById("stop").addEventListener("click", () => {
         guidedRun = null;
     }
 
-    const endTime = Date.now();
     const runTime = (endTime - startTime) / 1000;
     const pace = totalDistance > 0 ? (runTime / (totalDistance / 1000)) : 0;
 
-    if (currentRunId) {
-        const tx = db.transaction(["runs"], "readwrite");
-        const store = tx.objectStore("runs");
-        const req = store.get(currentRunId);
-        req.onsuccess = () => {
-            const runData = req.result;
-            if (runData) {
-                runData.endTime = endTime;
-                runData.distance = totalDistance;
-                runData.time = runTime;
-                runData.pace = pace;
-                runData.timeSeries = timeSeriesData;
-                runData.pathSegments = [...pathSegments, currentSegment];
-                runData.estimatedDistance = estimatedDistance;
-                updateRun(runData)
-                    .then(() => displayRunSummary(runData))
-                    .catch(error => console.error("Error updating run:", error));
-            }
-        };
-    }
-});
+    if (!currentRunId) return Promise.resolve();
+    return getRunById(currentRunId)
+        .then(runData => {
+            runData = runData || { runId: currentRunId, startTime: startTime };
+            runData.endTime = endTime;
+            runData.distance = totalDistance;
+            runData.time = runTime;
+            runData.pace = pace;
+            runData.timeSeries = timeSeriesData;
+            runData.track = trackData;
+            runData.pathSegments = [...pathSegments, currentSegment];
+            runData.estimatedDistance = estimatedDistance;
+            return updateRun(runData).then(() => displayRunSummary(runData));
+        })
+        .catch(error => console.error("Error updating run:", error));
+}
 
 // ─── Utility ───────────────────────────────────────────────────────────────────
 
 function speakText(text) {
+    if (NativeTracker.available) { NativeTracker.speak(text); return; }
+    if (!window.speechSynthesis) return;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
     speechSynthesis.speak(utterance);
@@ -480,6 +543,7 @@ function autoSaveRun() {
             runData.time = elapsed;
             runData.pace = totalDistance > 0 ? (elapsed / (totalDistance / 1000)) : 0;
             runData.timeSeries = timeSeriesData;
+            runData.track = trackData;
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
             store.put(runData);
@@ -490,9 +554,10 @@ function autoSaveRun() {
 function checkForInterruptedRun() {
     getAllRuns().then(runs => {
         const tx = db.transaction(["runs"], "readwrite");
-        runs.filter(r => r.endTime === null && !(r.distance > 50))
+        const unfinished = runs.filter(r => r.endTime === null && r.runId !== currentRunId);
+        unfinished.filter(r => !(r.distance > 50))
             .forEach(r => tx.objectStore("runs").delete(r.runId));
-        const interrupted = runs.find(r => r.endTime === null && r.distance > 50);
+        const interrupted = unfinished.find(r => r.distance > 50);
         if (interrupted) {
             const dist = (interrupted.distance / 1000).toFixed(2);
             const time = formatTime(Math.floor(interrupted.time || 0));
@@ -511,6 +576,14 @@ function checkForInterruptedRun() {
 }
 
 document.addEventListener('visibilitychange', () => {
+    if (nativeRun) {
+        // The service kept tracking while hidden; pull anything we missed.
+        if (!document.hidden) {
+            resyncNativeRun();
+            if (map) setTimeout(() => map.invalidateSize(), 200);
+        }
+        return;
+    }
     const running = watchId != null && !isPaused;
     if (document.hidden) {
         window._lastHiddenTime = Date.now();
@@ -665,6 +738,9 @@ function startTracking() {
         if (accuracy > MAX_ACCURACY_M) return;
 
         let { latitude, longitude } = position.coords;
+        const gpsSpeed = Number.isFinite(position.coords.speed) ? position.coords.speed : null;
+        const gpsBearing = Number.isFinite(position.coords.heading) ? position.coords.heading : null;
+        lastGpsMotion = { speed: gpsSpeed, bearing: gpsBearing, at: now };
 
         if (!kalmanLat) {
             kalmanLat = new KalmanFilter(0.0001, latitude);
@@ -686,6 +762,7 @@ function startTracking() {
             userMarker.setLatLng([latitude, longitude]);
             map.setView([latitude, longitude]);
             prevPosition = { lat: latitude, lon: longitude };
+            addTrackPoint(now, latitude, longitude, gpsSpeed, gpsBearing);
             return;
         }
 
@@ -705,6 +782,7 @@ function startTracking() {
                 lastFixTime = now;
                 kalmanLat = new KalmanFilter(0.0001, latitude);
                 kalmanLon = new KalmanFilter(0.0001, longitude);
+                addTrackPoint(now, latitude, longitude, gpsSpeed, gpsBearing);
             }
             return;
         }
@@ -727,6 +805,7 @@ function startTracking() {
         prevPosition = { lat: latitude, lon: longitude };
 
         totalDistance += dist;
+        addTrackPoint(now, latitude, longitude, gpsSpeed, gpsBearing);
         document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
         pathLine.setLatLngs([...pathSegments, currentSegment]);
         userMarker.setLatLng([latitude, longitude]);
@@ -762,6 +841,13 @@ function startTracking() {
         }
 
         if (totalDistance >= nextMilestone) announceMilestone(now);
+        if (ghostRace) {
+            const cue = RunAnalysis.ghostCue(ghostRace.cue, {
+                yourDist: totalDistance, targetM: ghostRace.targetM, now,
+                ghostDist: getGhostDistanceAtTime(ghostRace.ghostTimeSeries, now - startTime),
+            });
+            if (cue) speakText(cue);
+        }
 
         // Timers are throttled while the page is hidden, so also drive the ghost
         // panel from GPS fixes to catch the finish line promptly.
@@ -772,6 +858,18 @@ function startTracking() {
             alert("Location permission denied. Please enable location access to track your run.");
         }
     }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+
+// Same shape and rounding as RunJson.trackPoint on Android.
+function addTrackPoint(now, lat, lng, speed, bearing) {
+    trackData.push([
+        now - startTime,
+        Math.round(totalDistance * 10) / 10,
+        Math.round(lat * 1e7) / 1e7,
+        Math.round(lng * 1e7) / 1e7,
+        speed == null ? null : Math.round(speed * 100) / 100,
+        bearing == null ? null : Math.round(bearing * 10) / 10,
+    ]);
 }
 
 function announceMilestone(now) {
@@ -808,38 +906,47 @@ function announceMilestone(now) {
 
 // ─── Ghost Race ───────────────────────────────────────────────────────────────
 
-function startGhostRaceMode(km, ghostData) {
+// Starts a run against a ghost. `spec` says which ghost (see buildGhost in
+// ghost-race.js): a past run, or an even pace to a target time.
+function startGhostRaceMode(spec) {
     if (document.getElementById("start").disabled) {
         alert("Stop your current run before starting a ghost race.");
         return;
     }
+    buildGhost(spec).then(ghost => {
+        ghostRace = {
+            spec,
+            label: ghost.label,
+            targetM: ghost.targetM,
+            // Dense when the ghost's run has a per-fix track: exact path and pacing
+            ghostTimeSeries: ghost.series,
+            ghostSplits: ghost.splits,
+            ghostPace: ghost.pace,
+            finished: false,
+            cue: {},
+        };
 
-    ghostRace = {
-        targetKm: km,
-        ghostTimeSeries: ghostData.timeSeries,
-        ghostTotalTime: ghostData.time,
-        ghostTotalDistance: ghostData.distance,
-        ghostPace: ghostData.pace,
-        finished: false
-    };
+        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+        document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+        document.querySelector('[data-tab="track"]').classList.add("active");
+        document.getElementById("tab-track").classList.add("active");
+        setTimeout(() => map.invalidateSize(), 100);
 
-    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-    document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
-    document.querySelector('[data-tab="track"]').classList.add("active");
-    document.getElementById("tab-track").classList.add("active");
-    setTimeout(() => map.invalidateSize(), 100);
+        showGhostPanel(ghostRace.label, ghostRace.ghostPace);
+        document.getElementById("start").click();
+    }).catch(err => alert("Couldn't set up that ghost: " + (err && err.message || err)));
+}
 
+function showGhostPanel(label, ghostPace) {
     const panel = document.getElementById("ghost-panel");
     panel.style.display = "block";
-    document.getElementById("ghost-panel-title").textContent = `Ghost Race: ${km}K PB`;
+    document.getElementById("ghost-panel-title").textContent = `Ghost Race: ${label}`;
     document.getElementById("ghost-your-dist").textContent = "0.00 km";
     document.getElementById("ghost-ghost-dist").textContent = "0.00 km";
     document.getElementById("ghost-your-pace").textContent = "--:-- /km";
-    document.getElementById("ghost-ghost-pace").textContent = formatTime(Math.floor(ghostData.pace)) + " /km";
+    document.getElementById("ghost-ghost-pace").textContent = formatTime(Math.floor(ghostPace)) + " /km";
     document.getElementById("ghost-diff").textContent = "Starting...";
     document.getElementById("ghost-diff").className = "ghost-diff-bar";
-
-    document.getElementById("start").click();
 }
 
 function updateGhostPanel() {
@@ -873,7 +980,7 @@ function updateGhostPanel() {
         document.getElementById("ghost-your-pace").textContent = formatTime(Math.floor(yourPaceSec)) + " /km";
     }
 
-    const targetDist = ghostRace.targetKm * 1000;
+    const targetDist = ghostRace.targetM;
     const yourFinished = totalDistance >= targetDist;
     const ghostFinished = ghostDist >= targetDist;
 
@@ -885,13 +992,13 @@ function updateGhostPanel() {
         ghostRace.finished = true;
         const ghostTimeMs = getGhostTimeAtDistance(ghostRace.ghostTimeSeries, targetDist);
         if (ghostTimeMs !== null && elapsedMs < ghostTimeMs) {
-            diffEl.textContent = "You beat your PB ghost!";
+            diffEl.textContent = `You beat your ghost by ${formatTime(Math.round((ghostTimeMs - elapsedMs) / 1000))}!`;
             diffEl.className = "ghost-diff-bar ahead";
-            speakText("You beat your ghost! New personal best pace!");
+            if (!nativeRun) speakText("You beat your ghost!");
         } else {
             diffEl.textContent = "Ghost wins this time. Keep pushing!";
             diffEl.className = "ghost-diff-bar behind";
-            speakText("Ghost wins. Great effort, keep training!");
+            if (!nativeRun) speakText("Ghost wins. Great effort, keep training!");
         }
         return;
     }
@@ -934,17 +1041,20 @@ function renderPreviousRunsTable() {
     }
 
     let table = `<table border="1" cellpadding="5" cellspacing="0">
-        <tr><th>Date</th><th>Distance (km)</th><th>Time</th><th>Pace (/km)</th></tr>`;
+        <tr><th>Date</th><th>Distance (km)</th><th>Time</th><th>Pace (/km)</th><th></th></tr>`;
     pageRuns.forEach(run => {
         table += `<tr>
             <td>${new Date(run.startTime).toLocaleString()}</td>
             <td>${(run.distance / 1000).toFixed(2)}</td>
             <td>${formatTime(Math.floor(run.time))}</td>
             <td>${formatTime(Math.floor(run.pace))}</td>
+            <td>${run.endTime ? `<button class="btn-small run-details" data-id="${run.runId}">Details</button>` : ""}</td>
         </tr>`;
     });
     table += `</table>`;
     container.innerHTML = table;
+    container.querySelectorAll(".run-details").forEach(b =>
+        b.addEventListener("click", () => openRunDetail(Number(b.dataset.id))));
 
     document.getElementById("prevPage").disabled = currentPage === 0;
     document.getElementById("nextPage").disabled = (startIdx + currentPageSize) >= sortedRuns.length;
@@ -1263,27 +1373,31 @@ function startGuidedRun(courseId, levelKey, sessionIndex) {
         document.getElementById("tab-track").classList.add("active");
         setTimeout(() => map.invalidateSize(), 100);
 
-        // Show panel with "get ready" state
-        const panel = document.getElementById("guided-run-panel");
-        panel.style.display = "block";
-        panel.className = "";
-        document.getElementById("gr-session-name").textContent = sess.title;
-        document.getElementById("gr-segment-type").textContent = "GET READY";
-        document.getElementById("gr-segment-intensity").textContent = "";
-        document.getElementById("gr-time-remaining").textContent = "";
-        document.getElementById("gr-next-segment").textContent = `First: ${SEGMENT_NAMES[sess.segments[0].type] || sess.segments[0].type}`;
-        document.getElementById("gr-segment-count").textContent = `${sess.segments.length} segments total`;
-        document.getElementById("gr-segment-progress").style.width = "0%";
+        showGuidedPanel(sess);
 
         // Start the actual run (GPS + timer)
         document.getElementById("start").click();
 
-        // Countdown then start first segment
+        // Countdown then start first segment (the Android service runs its own)
+        if (NativeTracker.available) return;
         speakText("Get ready. Starting in 5 seconds.");
         setTimeout(() => {
             if (guidedRun) startSegment(0);
         }, 5000);
     });
+}
+
+function showGuidedPanel(sess) {
+    const panel = document.getElementById("guided-run-panel");
+    panel.style.display = "block";
+    panel.className = "";
+    document.getElementById("gr-session-name").textContent = sess.title;
+    document.getElementById("gr-segment-type").textContent = "GET READY";
+    document.getElementById("gr-segment-intensity").textContent = "";
+    document.getElementById("gr-time-remaining").textContent = "";
+    document.getElementById("gr-next-segment").textContent = `First: ${SEGMENT_NAMES[sess.segments[0].type] || sess.segments[0].type}`;
+    document.getElementById("gr-segment-count").textContent = `${sess.segments.length} segments total`;
+    document.getElementById("gr-segment-progress").style.width = "0%";
 }
 
 function startSegment(index, scheduledStart = Date.now()) {
@@ -1332,6 +1446,38 @@ function updateGuidedRunUI() {
     const elapsed = ((Date.now() - guidedRun.segmentStartTime) / 1000) - guidedRun.segmentPausedElapsed;
     const remaining = Math.max(0, durationSec - elapsed);
 
+    renderGuidedPanel(remaining);
+
+    // Voice countdowns
+    if (remaining <= 10 && remaining > 9 && !guidedRun.announcedWarnings["10"] && durationSec > 20) {
+        guidedRun.announcedWarnings["10"] = true;
+        speakText("10 seconds");
+    }
+    if (remaining <= 3 && remaining > 2 && !guidedRun.announcedWarnings["3"] && durationSec > 10) {
+        guidedRun.announcedWarnings["3"] = true;
+        speakText("3");
+    }
+    if (remaining <= 2 && remaining > 1 && !guidedRun.announcedWarnings["2"] && durationSec > 10) {
+        guidedRun.announcedWarnings["2"] = true;
+        speakText("2");
+    }
+    if (remaining <= 1 && remaining > 0 && !guidedRun.announcedWarnings["1"] && durationSec > 10) {
+        guidedRun.announcedWarnings["1"] = true;
+        speakText("1");
+    }
+
+    if (remaining <= 0) {
+        clearInterval(guidedRun.segmentInterval);
+        const segEnd = guidedRun.segmentStartTime + (durationSec + guidedRun.segmentPausedElapsed) * 1000;
+        startSegment(guidedRun.currentSegmentIndex + 1, segEnd);
+    }
+}
+
+// Draws the current segment of guidedRun with `remaining` seconds left.
+function renderGuidedPanel(remaining) {
+    const seg = guidedRun.segments[guidedRun.currentSegmentIndex];
+    const durationSec = Math.round(seg.duration * 60);
+
     // Update panel color
     const panel = document.getElementById("guided-run-panel");
     panel.className = `seg-${seg.type}`;
@@ -1359,30 +1505,6 @@ function updateGuidedRunUI() {
     } else {
         document.getElementById("gr-next-segment").textContent = "Final segment!";
     }
-
-    // Voice countdowns
-    if (remaining <= 10 && remaining > 9 && !guidedRun.announcedWarnings["10"] && durationSec > 20) {
-        guidedRun.announcedWarnings["10"] = true;
-        speakText("10 seconds");
-    }
-    if (remaining <= 3 && remaining > 2 && !guidedRun.announcedWarnings["3"] && durationSec > 10) {
-        guidedRun.announcedWarnings["3"] = true;
-        speakText("3");
-    }
-    if (remaining <= 2 && remaining > 1 && !guidedRun.announcedWarnings["2"] && durationSec > 10) {
-        guidedRun.announcedWarnings["2"] = true;
-        speakText("2");
-    }
-    if (remaining <= 1 && remaining > 0 && !guidedRun.announcedWarnings["1"] && durationSec > 10) {
-        guidedRun.announcedWarnings["1"] = true;
-        speakText("1");
-    }
-
-    if (remaining <= 0) {
-        clearInterval(guidedRun.segmentInterval);
-        const segEnd = guidedRun.segmentStartTime + (durationSec + guidedRun.segmentPausedElapsed) * 1000;
-        startSegment(guidedRun.currentSegmentIndex + 1, segEnd);
-    }
 }
 
 function pauseGuidedRun() {
@@ -1406,21 +1528,23 @@ function completeGuidedRun() {
     speakText("Workout complete! Great job!");
 
     // Mark session complete in course progress
-    getCourseProgress(guidedRun.courseId).then(progress => {
-        if (progress && progress.level === guidedRun.level) {
-            if (!progress.completedSessions.find(s => s.sessionIndex === guidedRun.sessionIndex)) {
-                progress.completedSessions.push({ sessionIndex: guidedRun.sessionIndex, date: Date.now() });
-                const course = COURSES.find(c => c.id === guidedRun.courseId);
-                const total = course.levels[progress.level].sessions.length;
-                if (progress.completedSessions.length >= total) progress.status = "completed";
-                saveCourseProgress(progress);
-            }
-        }
-
+    markGuidedSessionComplete(guidedRun.courseId, guidedRun.level, guidedRun.sessionIndex).then(() => {
         document.getElementById("guided-run-panel").style.display = "none";
         guidedRun = null;
 
         // Stop the run
         document.getElementById("stop").click();
+    });
+}
+
+function markGuidedSessionComplete(courseId, level, sessionIndex) {
+    return getCourseProgress(courseId).then(progress => {
+        if (!progress || progress.level !== level) return;
+        if (progress.completedSessions.find(s => s.sessionIndex === sessionIndex)) return;
+        progress.completedSessions.push({ sessionIndex, date: Date.now() });
+        const course = COURSES.find(c => c.id === courseId);
+        const total = course.levels[progress.level].sessions.length;
+        if (progress.completedSessions.length >= total) progress.status = "completed";
+        return saveCourseProgress(progress);
     });
 }
