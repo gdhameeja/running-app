@@ -41,6 +41,8 @@ class RunTrackerService : Service(), LocationListener {
         const val ACTION_PAUSE = "pause"
         const val ACTION_RESUME = "resume"
         const val ACTION_STOP = "stop"
+        const val ACTION_RATE = "rate"
+        const val EXTRA_DELTA = "delta"
         private const val CHANNEL_ID = "run_tracking"
         private const val NOTIFICATION_ID = 1
         private const val TICK_MS = 500L
@@ -117,6 +119,7 @@ class RunTrackerService : Service(), LocationListener {
             ACTION_PAUSE -> pauseRun()
             ACTION_RESUME -> resumeRun()
             ACTION_STOP -> stopRun()
+            ACTION_RATE -> rateRelative(intent.getIntExtra(EXTRA_DELTA, 0))
             else -> if (engine == null) stopSelf()
         }
         // Not sticky: if the process dies the web layer recovers the last snapshot
@@ -157,6 +160,22 @@ class RunTrackerService : Service(), LocationListener {
         val now = System.currentTimeMillis()
         e.resume(now)
         requestLocation()
+        publish(now)
+    }
+
+    /** Your effort rating (1-5) for the Tune-In coach, from the run screen. */
+    fun rate(rating: Int) {
+        val e = engine ?: return
+        val now = System.currentTimeMillis()
+        speakAll(e.rate(rating, now))
+        publish(now)
+    }
+
+    /** Too easy / just right / too hard, from the notification buttons. */
+    private fun rateRelative(delta: Int) {
+        val e = engine ?: return
+        val now = System.currentTimeMillis()
+        speakAll(e.rateRelative(delta, now))
         publish(now)
     }
 
@@ -277,7 +296,7 @@ class RunTrackerService : Service(), LocationListener {
         val guided = e.config.guided
         if (guided != null && e.guidedIndex in guided.indices) {
             val seg = guided[e.guidedIndex]
-            text += " · ${RunEngine.segmentName(seg.type)} ${RunEngine.formatTime(e.guidedRemainingMs(now) / 1000)} left"
+            text += " · ${RunEngine.segmentName(seg)} ${RunEngine.formatTime(e.guidedRemainingMs(now) / 1000)} left"
         }
         if (e.status == RunEngine.Status.PAUSED) text = "Paused · $text"
 
@@ -291,7 +310,7 @@ class RunTrackerService : Service(), LocationListener {
         val toggle = PendingIntent.getService(this, 1, intent(this, if (paused) ACTION_RESUME else ACTION_PAUSE), flags)
         val stop = PendingIntent.getService(this, 2, intent(this, ACTION_STOP), flags)
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_run_notification)
             .setContentTitle(title)
             .setContentText(text)
@@ -302,8 +321,17 @@ class RunTrackerService : Service(), LocationListener {
             .setCategory(NotificationCompat.CATEGORY_WORKOUT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(0, if (paused) "Resume" else "Pause", toggle)
-            .addAction(0, "Finish", stop)
-            .build()
+        val coach = e.coach
+        if (!paused && e.coachActive && coach != null) {
+            // Tune-In: answer the coach from the lock screen (only three buttons fit)
+            coach.instruction(now)?.let { builder.setContentText("$text · $it") }
+            listOf(-1 to "Too easy", 0 to "Just right", 1 to "Too hard").forEachIndexed { i, (delta, label) ->
+                val rate = PendingIntent.getService(this, 10 + i, intent(this, ACTION_RATE).putExtra(EXTRA_DELTA, delta), flags)
+                builder.addAction(0, label, rate)
+            }
+        } else {
+            builder.addAction(0, if (paused) "Resume" else "Pause", toggle).addAction(0, "Finish", stop)
+        }
+        return builder.build()
     }
 }

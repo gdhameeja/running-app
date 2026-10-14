@@ -9,8 +9,10 @@ foreground service that owns the run so it keeps going with the screen locked.
 |---|---|---|
 | Web UI | `index.html`, `script.js`, `courses.js`, `performance.js` | Screens, map, charts, IndexedDB storage. Unchanged in the browser. |
 | Bridge | `native-tracker.js` | In the app, starts/pauses/stops the service, mirrors its state into the UI, saves finished runs. |
-| Plugin | `android/.../tracking/RunTrackerPlugin.kt` | Capacitor plugin `RunTracker` (start, pause, resume, stop, getState, clear, speak). |
-| Service | `android/.../tracking/RunTrackerService.kt` | Foreground service: GPS, wake lock, notification (Pause/Finish), TTS, snapshot to disk every 10 s. |
+| Plugin | `android/.../tracking/RunTrackerPlugin.kt` | Capacitor plugin `RunTracker` (start, pause, resume, stop, getState, clear, speak, rate). |
+| Service | `android/.../tracking/RunTrackerService.kt` | Foreground service: GPS, wake lock, notification (Pause/Finish, or Too easy/Just right/Too hard during Tune-In check-ins), TTS, snapshot to disk every 10 s. |
+| GPS filter | `gps-filter.js`, `GpsFilter` in `RunEngine.kt` | Constant-velocity Kalman filter in metres, using the receiver's Doppler speed and bearing; keeps jitter out of distance. |
+| Tune-In coach | `coach.js`, `TuneInCoach.kt` | Asks for effort ratings (1-5, talk-test anchored) during coached segments and adapts targets and surges. |
 | AR sensors | `android/.../tracking/ArSensors.kt` | Rotation-vector stream, magnetic declination and rear-camera optics for the AR ghost view. |
 | Engine | `android/.../tracking/RunEngine.kt` | Pure Kotlin port of the tracking logic (filtering, gaps, splits, guided segments, ghost race). Unit tested. |
 
@@ -70,6 +72,15 @@ Runs also store what they were doing, for the run detail page:
   to replay a run, or `{ type: "pace", targetM, timeMs }` for a target time).
   `buildGhost` in `ghost-race.js` turns a spec into the ghost's series.
 - `guided`: the course session (title and segments) for the workout report.
+- `ratings`: Tune-In check-ins, `[[movingMs, rating 1-5], ...]`.
+
+## Courses with scripted and coached segments
+
+Guided segments can carry `label` and `say` (their own name and spoken words;
+Fun Run games) and `target` (1-5) plus `surges` (Tune-In). Both the web runner
+in `script.js` and `RunEngine.tickGuided` honour them; `coach.js` and
+`TuneInCoach.kt` must stay in step (`tests.js` and `TuneInCoachTest.kt` test
+the same cases).
 
 ## Ghost races, routes and run details
 

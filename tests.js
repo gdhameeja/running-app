@@ -623,6 +623,275 @@ function straightTrack(totalM, speed = 4, stopAt = null, stopMs = 0, lng = 77.59
     assertApprox(RA.fiveKPace(runs, 2000), 3000 * Math.pow(0.5, 1.06) / 5, 0.01, "Riegel 5K pace from a 10K");
 })();
 
+(function testBestEfforts() {
+    // 2 km at 6:00/km, then 1 km at 4:00/km, then 1 km at 6:00/km; one fix every 3 m
+    const track = [];
+    let t = 2000;
+    for (let d = 0; d <= 4000; d += 3) {
+        track.push([Math.round(t), d, 12.97 + d * M_LAT, 77.59]);
+        t += 3 * (d >= 2000 && d < 3000 ? 0.24 : 0.36) * 1000;
+    }
+    const run = { startTime: 1, endTime: 2, distance: 4000, time: t / 1000, track };
+    const e1 = RA.runBestEffort(run, 1000);
+    assertApprox(e1.timeMs, 240000, 1500, "Best 1K is the fast kilometre in the middle (4:00)");
+    assertApprox(e1.startM, 2000, 6, "...and it starts 2 km in");
+    const e3 = RA.runBestEffort(run, 3000);
+    assertApprox(e3.timeMs, 960000, 2000, "Best 3K: 2 km slow + the fast km = 16:00, not the start");
+    assert(RA.runBestEffort(run, 5000) === null, "No 5K effort in a 4 km run");
+
+    const noData = RA.runBestEffort({ distance: 5000, time: 1500 }, 1000);
+    assert(noData.even && noData.timeMs === 300000, "No timing data: even pace at the run's average");
+
+    // 100 m splits from older runs start at 100 m; the start line is added back
+    const splits = [];
+    for (let d = 100; d <= 1000; d += 100) splits.push({ distance: d, time: d * 300 });
+    const old = { distance: 1050, time: 316, timeSeries: splits };
+    const full = RA.completeSeries(old);
+    assert(full[0].distance === 0 && full[0].time === 0 && full[full.length - 1].distance === 1050, "Older runs: series gets its start and finish");
+    assertApprox(RA.runBestEffort(old, 1000).timeMs, 300000, 1, "Older runs: best 1K from their splits");
+
+    const slice = RA.sliceSeries(RA.completeSeries(run), e1.startM);
+    assert(slice[0].distance === 0 && slice[0].time === 0 && slice[0].lat != null, "Sliced ghost starts at 0 m, 0 s, with a position");
+    assertApprox(RA.timeAtDistance(slice, 1000), e1.timeMs, 1, "Sliced ghost runs the fast km in the PB time");
+})();
+
+// ─── GPS Filter ─────────────────────────────────────────────────────────────
+
+console.log("\n=== GPS Filter Tests (synthetic runs) ===\n");
+
+const GpsFilter = require("./gps-filter.js");
+
+(function testGpsFilter() {
+    // Seeded RNG so the "GPS noise" is the same every run
+    let seed = 42;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+    const LAT0 = 12.97, LNG0 = 77.59, M = 6371000 * Math.PI / 180;
+    const toLL = (x, y) => [LAT0 + y / M, LNG0 + x / (M * Math.cos(LAT0 * Math.PI / 180))];
+
+    // A route as a function of distance along it -> [x, y] metres
+    const straight = s => [s, 0];
+    const oval = s => { // 400 m running track
+        const st = 84.39, r = 36.5, lap = 2 * st + 2 * Math.PI * r;
+        s %= lap;
+        if (s < st) return [s, 0];
+        if (s < st + Math.PI * r) { const a = -Math.PI / 2 + (s - st) / r; return [st + r * Math.cos(a), r + r * Math.sin(a)]; }
+        if (s < 2 * st + Math.PI * r) return [st - (s - st - Math.PI * r), 2 * r];
+        const a = Math.PI / 2 + (s - 2 * st - Math.PI * r) / r;
+        return [r * Math.cos(a), r + r * Math.sin(a)];
+    };
+
+    // 1 Hz fixes along `route`. GPS error is mostly slowly wandering
+    // (Gauss-Markov, 3 m, 40 s) plus a little white jitter; Doppler speed and
+    // bearing have 0.15 m/s noise.
+    function simulate(route, lengthM, speedAt, { doppler = true, standSec = 0 } = {}) {
+        const phi = Math.exp(-1 / 40), q = 3 * Math.sqrt(1 - phi * phi);
+        let ex = 3 * gauss(), ey = 3 * gauss(), s = 0;
+        const fixes = [];
+        for (let t = 1; s < lengthM; t++) {
+            const v = t <= standSec ? 0 : speedAt(t);
+            const [x0, y0] = route(s);
+            s = Math.min(lengthM, s + v);
+            const [x, y] = route(s);
+            ex = phi * ex + q * gauss(); ey = phi * ey + q * gauss();
+            const [lat, lng] = toLL(x + ex + 0.5 * gauss(), y + ey + 0.5 * gauss());
+            let speed = null, bearing = null;
+            if (doppler) {
+                const vx = x - x0 + 0.15 * gauss(), vy = y - y0 + 0.15 * gauss();
+                speed = Math.hypot(vx, vy);
+                bearing = speed > 0.5 ? (Math.atan2(vx, vy) * 180 / Math.PI + 360) % 360 : null;
+            }
+            fixes.push({ time: t * 1000, lat, lng, accuracy: 4 + 2 * rnd(), speed, bearing, trueSpeed: v });
+        }
+        return fixes;
+    }
+
+    // Distance the way the trackers add it up: skip moves under 3 m
+    function measure(fixes, useFilter) {
+        const f = new GpsFilter();
+        let prev = null, d = 0, speedErr = 0, n = 0;
+        for (const fix of fixes) {
+            const p = useFilter ? f.update(fix.lat, fix.lng, fix.accuracy, fix.time, fix.speed, fix.bearing) : fix;
+            if (!p) continue;
+            if (useFilter && fix.trueSpeed > 1) { speedErr += (p.speed - fix.trueSpeed) ** 2; n++; }
+            if (!prev) { prev = p; continue; }
+            const step = getDistance(prev.lat, prev.lng, p.lat, p.lng);
+            if (step < 3) continue;
+            d += step;
+            prev = p;
+        }
+        return { d, speedRmse: n ? Math.sqrt(speedErr / n) : null };
+    }
+
+    const cases = [
+        ["5 km straight at 5:30/km", straight, 5000, () => 3.03, {}],
+        ["10 laps of a 400 m track at 5:00/km", oval, 4000, () => 3.33, {}],
+        ["Intervals on the track (5.0 / 2.2 m/s)", oval, 3200, t => (Math.floor(t / 60) % 2 ? 2.2 : 5.0), {}],
+        ["3 min standing at the start, then 2 km", straight, 2000, () => 3.2, { standSec: 180 }],
+    ];
+    for (const [name, route, length, speed, opts] of cases) {
+        let raw = 0, filt = 0, rmse = 0;
+        const N = 5;
+        for (let i = 0; i < N; i++) {
+            const fixes = simulate(route, length, speed, opts);
+            raw += Math.abs(measure(fixes, false).d - length) / length / N;
+            const m = measure(fixes, true);
+            filt += Math.abs(m.d - length) / length / N;
+            rmse += m.speedRmse / N;
+        }
+        assert(filt < 0.015 && filt < raw,
+            `${name}: filtered error ${(filt * 100).toFixed(1)}% (raw fixes ${(raw * 100).toFixed(1)}%)`);
+        assert(rmse < 0.35, `${name}: current speed within ${rmse.toFixed(2)} m/s RMS`);
+    }
+
+    // Without Doppler (some browsers) it should still beat raw fixes
+    let raw = 0, filt = 0;
+    for (let i = 0; i < 5; i++) {
+        const fixes = simulate(oval, 4000, () => 3.33, { doppler: false });
+        raw += Math.abs(measure(fixes, false).d - 4000) / 4000 / 5;
+        filt += Math.abs(measure(fixes, true).d - 4000) / 4000 / 5;
+    }
+    assert(filt < raw, `No Doppler: filtered ${(filt * 100).toFixed(1)}% vs raw ${(raw * 100).toFixed(1)}%`);
+
+    // A single wild fix is ignored; three in a row mean the filter is wrong and it restarts there
+    const f = new GpsFilter();
+    let p;
+    for (let t = 1; t <= 30; t++) p = f.update(LAT0 + 3 * t / M, LNG0, 5, t * 1000, 3, 0);
+    assert(f.update(LAT0 + 93 / M + 80 / M, LNG0, 5, 31000, 3, 0) === null, "80 m jump in one second: rejected");
+    p = f.update(LAT0 + 96 / M, LNG0, 5, 32000, 3, 0);
+    assert(p && Math.abs((p.lat - LAT0) * M - 96) < 3, "Next good fix: back on track");
+    let r = [];
+    for (let t = 33; t <= 35; t++) r.push(f.update(LAT0 + 500 / M, LNG0, 5, t * 1000, 0, null));
+    assert(r[0] === null && r[1] === null && r[2] && Math.abs((r[2].lat - LAT0) * M - 500) < 1,
+        "Three far fixes in a row: filter restarts at the new position");
+
+    // Standing still with Doppler says 0 m/s
+    const g = new GpsFilter();
+    for (let t = 1; t <= 20; t++) p = g.update(LAT0 + gauss() / M, LNG0 + gauss() / M, 5, t * 1000, 0.1, null);
+    assert(p.speed < 0.3, `Standing still: speed ${p.speed.toFixed(2)} m/s`);
+})();
+
+// ─── Tune-In coach ──────────────────────────────────────────────────────────
+
+console.log("\n=== Tune-In Coach Tests ===\n");
+
+const { TuneInCoach, EFFORT_ANCHORS } = require("./coach.js");
+
+(function testCoachChecksAndNudges() {
+    const MIN = 60000;
+    const c = new TuneInCoach([{ target: null, durationMs: 5 * MIN }, { target: 3, durationMs: 20 * MIN }]);
+    const said = [];
+    const run = (from, to) => { for (let t = from; t <= to; t += 500) said.push(...c.tick(t).map(p => [t, p])); };
+    assert(c.startSegment(0, 0).length === 0 && !c.active, "Uncoached segment: coach stays quiet");
+    run(0, 5 * MIN - 500);
+    assert(said.length === 0, "No check-ins outside coached segments");
+
+    c.startSegment(1, 5 * MIN);
+    run(5 * MIN, 5 * MIN + 89000);
+    assert(said.length === 0, "No check-in in the first 90 s");
+    run(5 * MIN + 90000, 5 * MIN + 90000);
+    assert(said.length === 1 && /1 to 5/.test(said[0][1]) && c.state(0).asking, "First check-in at 90 s");
+
+    let r = c.rate(4, 5 * MIN + 95000);
+    assert(/Ease off/.test(r[0]) && c.target() === 3, "4 when aiming for 3: ease off");
+    r = c.rate(4, 5 * MIN + 160000);
+    assert(c.target() === 2 && /gentler/.test(r[0]), "Too hard twice: target drops to 2");
+
+    r = c.rate(5, 6 * MIN);
+    assert(c.state(6 * MIN).mode === "recover" && /back right off/.test(r[0]), "5: back right off into recovery");
+    assert(c.tick(6 * MIN + 30000).length === 0, "Quiet during recovery");
+    r = c.tick(7 * MIN);
+    assert(/settle back in/.test(r[0]), "After a minute: settle back in");
+    assert(c.target() === 2, "The target never drops more than one step below the plan");
+
+    const d = new TuneInCoach([{ target: 3, durationMs: 30 * MIN }]);
+    d.startSegment(0, 0);
+    d.rate(2, 100000);
+    r = d.rate(1, 170000);
+    assert(d.target() === 4 && /flying/.test(r[0]), "Too easy twice: target rises to 4");
+    d.rate(1, 240000); d.rate(1, 300000);
+    assert(d.target() === 4, "Target never goes above 4");
+    assert(d.ratings.length === 4 && d.ratings[0][1] === 2, "Ratings are recorded");
+    r = d.rate(4, 360000);
+    assert(/Perfect|Spot on|Lovely/.test(r[0]), "On target: praise");
+})();
+
+(function testCoachQuietEndAndTimeout() {
+    const c = new TuneInCoach([{ target: 3, durationMs: 100000 }]);
+    c.startSegment(0, 0);
+    let said = [];
+    for (let t = 0; t < 100000; t += 500) said.push(...c.tick(t));
+    assert(said.length === 0, "No check-in in a segment's last 30 s");
+
+    const d = new TuneInCoach([{ target: 2, durationMs: 600000 }]);
+    d.startSegment(0, 0);
+    said = [];
+    for (let t = 0; t <= 200000; t += 500) said.push(...d.tick(t));
+    assert(said.length === 2, `Unanswered check-ins time out and come back (${said.length} asks by 200 s)`);
+})();
+
+(function testCoachSurges() {
+    const MIN = 60000;
+    const c = new TuneInCoach([{ target: 3, surges: true, durationMs: 20 * MIN }]);
+    c.startSegment(0, 0);
+    let said = [];
+    const run = (from, to) => { for (let t = from; t <= to; t += 500) said.push(...c.tick(t).map(p => [t, p])); };
+    run(0, 90000);
+    c.rate(3, 92000); // on target
+    said = [];
+    run(92000, 170000);
+    const surge = said.find(x => /Surge! 30 seconds/.test(x[1]));
+    assert(surge && surge[0] === 167000, "On target and 150 s+ in: a 30 s surge at the next check-in");
+    said = [];
+    run(170000, 200000);
+    assert(said.some(x => /How was that surge/.test(x[1])), "After the surge: asks how it was");
+    let r = c.rate(2, 200000);
+    assert(/45 seconds/.test(r[0]), "Surge felt easy: next one is 45 s");
+    c.rate(3, 300000);
+    said = [];
+    run(300000, 430000);
+    assert(said.some(x => /Surge! 45 seconds/.test(x[1])), "Next surge is 45 s");
+    r = c.rate(5, said.find(x => /How was that surge/.test(x[1]))[0] + 1000);
+    assert(/shorter/.test(r[0]) && c.state(0).mode === "recover", "Surge maxed you out: recover, next one shorter");
+
+    const easy = new TuneInCoach([{ target: 3, surges: false, durationMs: 20 * MIN }]);
+    easy.startSegment(0, 0);
+    easy.rate(3, 92000);
+    said = [];
+    for (let t = 92000; t < 15 * MIN; t += 500) said.push(...easy.tick(t));
+    assert(!said.some(p => /Surge/.test(p)), "No surges unless the segment asks for them");
+})();
+
+(function testNewCourses() {
+    global.EFFORT_ANCHORS = EFFORT_ANCHORS;
+    const { COURSES } = new Function(require("fs").readFileSync("./courses.js", "utf8") + "; return { COURSES };")();
+    const fun = COURSES.find(c => c.id === "fun-run");
+    const tune = COURSES.find(c => c.id === "tune-in");
+    assert(fun && tune, "Fun Run and Tune-In courses exist");
+    const all = [...Object.values(fun.levels), ...Object.values(tune.levels)].flatMap(l => l.sessions);
+    assert(all.every(s => s.segments.every(x => x.duration > 0 && x.intensity)), "Every segment has a duration and intensity");
+    const funSegs = Object.values(fun.levels).flatMap(l => l.sessions).flatMap(s => s.segments);
+    assert(funSegs.every(x => x.say && x.label), "Every Fun Run segment has its own words and label");
+    assert(!funSegs.some(x => /all-out|sprint|max/i.test(x.say + x.intensity) && !/not all out/i.test(x.say)), "Fun Run never asks for all-out efforts");
+    assert(funSegs.every(x => x.type !== "stride" && x.type !== "play" || x.duration * 60 <= 60), "Fun Run bursts are a minute or less");
+    const funSessions = Object.values(fun.levels).flatMap(l => l.sessions);
+    assert(funSessions.every(s => s.segments[s.segments.length - 1].type === "cooldown" &&
+        s.segments[s.segments.length - 2].label === "Victory!"), "Every Fun Run ends with a celebration, then an easy cool-down");
+    const lastHard = funSessions.map(s => {
+        const total = s.segments.reduce((a, x) => a + x.duration, 0);
+        let t = 0, last = 0;
+        s.segments.forEach(x => { if (x.type === "stride") last = t + x.duration; t += x.duration; });
+        return last / total;
+    });
+    assert(Math.max(...lastHard) < 0.9, `Last stride ends before 90% of the session (latest ${(Math.max(...lastHard) * 100).toFixed(0)}%)`);
+    const titles = funSessions.slice(0, 6).map(s => s.title);
+    assert(new Set(titles).size === 6, "The first two weeks use six different themes");
+    const tuneSessions = Object.values(tune.levels).flatMap(l => l.sessions);
+    assert(tuneSessions.every(s => s.segments.some(x => x.target != null) && s.segments[s.segments.length - 1].target == null),
+        "Tune-In sessions are coached, and the cool-down isn't");
+    assert(tuneSessions.some(s => s.segments.some(x => x.surges)), "Waves sessions have adaptive surges");
+})();
+
 // ─── Pace Formatting ─────────────────────────────────────────────────────────
 
 console.log("\n=== Pace Formatting Tests ===\n");

@@ -3,6 +3,7 @@
 //
 // A ghost "spec" is small and saved with the run:
 //   { type: "run",  runId, targetM, label }   replay that run over targetM metres
+//                                              (from startM metres in, if set)
 //   { type: "pace", targetM, timeMs, label }  an even pace to a target time
 
 // Builds the ghost a spec describes. Resolves with { series, splits, pace, ... }.
@@ -21,6 +22,12 @@ function buildGhost(spec) {
     }
     return getRunById(spec.runId).then(run => {
         if (!run) throw new Error("that run has been deleted");
+        if (spec.startM != null) {
+            // A PB ghost replays the fastest stretch of the run, wherever it was
+            const full = RunAnalysis.completeSeries(run);
+            const sliced = full && RunAnalysis.sliceSeries(full, spec.startM);
+            if (sliced) return finish(sliced);
+        }
         let series = RunAnalysis.seriesForRun(run);
         if (!series) {
             // No timing data: an even pace at the run's average
@@ -33,21 +40,19 @@ function buildGhost(spec) {
     });
 }
 
-// Your fastest run (by pace) covering each standard distance.
+// Your fastest effort over each standard distance: the quickest stretch of
+// that length inside any run, not the run's average pace.
 function getBestRunsForGhost(runs) {
     const ghosts = {};
+    const bests = findBestEfforts(runs.filter(r => r.endTime), [1, 3, 5, 10]);
     [1, 3, 5, 10].forEach(km => {
-        let best = null, bestPace = Infinity;
-        runs.forEach(r => {
-            if (!r.endTime || r.distance < km * 1000 || !(r.time > 0)) return;
-            const pace = r.time / (r.distance / 1000);
-            if (pace < bestPace) { bestPace = pace; best = r; }
-        });
-        ghosts[km] = best && {
-            run: best, pace: bestPace,
-            timeSec: bestPace * km,
-            date: new Date(best.startTime).toLocaleDateString(),
-            simulated: !RunAnalysis.seriesForRun(best),
+        const b = bests[km];
+        ghosts[km] = b && {
+            run: b.run, startM: b.startM,
+            pace: b.timeMs / 1000 / km,
+            timeSec: b.timeMs / 1000,
+            date: new Date(b.run.startTime).toLocaleDateString(),
+            simulated: !!b.even,
         };
     });
     return ghosts;
@@ -182,7 +187,7 @@ function renderPbCards(ghosts) {
             <div class="ghost-date">No run this long yet</div>`;
         if (g) {
             card.querySelector("button").addEventListener("click", () =>
-                startGhostRaceMode({ type: "run", runId: g.run.runId, targetM: km * 1000, label: `${km}K PB` }));
+                startGhostRaceMode({ type: "run", runId: g.run.runId, startM: g.startM, targetM: km * 1000, label: `${km}K PB` }));
         }
         grid.appendChild(card);
     });
@@ -267,7 +272,6 @@ function renderPastRuns(runs) {
                     <div class="gr-run-title">${i === 0 ? "Last run · " : ""}${shortDate(r.startTime)}</div>
                     <div class="gr-run-meta">${(r.distance / 1000).toFixed(2)} km · ${formatTime(Math.round(r.time))} · ${formatPace(r.pace)} /km${r.track ? "" : " · splits only"}</div>
                 </div>
-                <button class="btn-small gr-details" data-id="${r.runId}">Details</button>
                 <button class="btn-small gr-race" data-id="${r.runId}">Race</button>
             </div>`).join("") +
             (eligible.length > shown ? '<button class="btn-small gr-more">Show more</button>' : "");
@@ -276,7 +280,6 @@ function renderPastRuns(runs) {
             const targetM = Math.floor(run.distance / 10) * 10;
             startGhostRaceMode({ type: "run", runId: run.runId, targetM, label: `Run of ${shortDate(run.startTime)}` });
         }));
-        el.querySelectorAll(".gr-details").forEach(b => b.addEventListener("click", () => openRunDetail(Number(b.dataset.id))));
         const more = el.querySelector(".gr-more");
         if (more) more.addEventListener("click", () => { shown += 8; draw(); });
     };

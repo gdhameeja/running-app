@@ -21,6 +21,7 @@ const NativeTracker = (() => {
         getState: () => call("getState").then(r => r.run || null),
         clear: () => call("clear"),
         speak: (text) => call("speak", { text }),
+        rate: (rating) => call("rate", { rating }),
         isIgnoringBatteryOptimizations: () => call("isIgnoringBatteryOptimizations").then(r => r.value),
         requestBatteryExemption: () => call("requestBatteryExemption"),
         onUpdate: (cb) => cap.addListener("RunTracker", "update", cb),
@@ -50,7 +51,8 @@ function startNativeRun() {
         previousTimeSeries: window.previousRunTimeSeries || null,
         ghost: ghostRace ? { targetM: ghostRace.targetM, timeSeries: ghostRace.ghostTimeSeries } : null,
         guided: guidedRun ? guidedRun.segments.map(s => ({
-            type: s.type, durationSec: Math.round(s.duration * 60), intensity: s.intensity
+            type: s.type, durationSec: Math.round(s.duration * 60), intensity: s.intensity,
+            label: s.label || null, say: s.say || null, target: s.target || null, surges: !!s.surges,
         })) : null,
         meta: JSON.stringify(meta),
     });
@@ -128,6 +130,8 @@ function attachNativeRun(run) {
     document.getElementById("stop").disabled = false;
     document.getElementById("lock-screen").disabled = false;
     isPaused = false;
+    setRunScreenState("running");
+    openRunScreen();
     applyNativeSnapshot(run);
     redrawPath();
     updateTimer();
@@ -156,8 +160,9 @@ function applyNativeSummary(s) {
     totalDistance = s.distance;
     estimatedDistance = s.estimatedDistance;
     if (s.motionAgeMs != null) lastGpsMotion = { speed: s.speed, bearing: s.bearing, at: Date.now() - s.motionAgeMs };
+    currentSpeed = s.currentSpeedAgeMs != null ? { mps: s.currentSpeed, at: Date.now() - s.currentSpeedAgeMs } : null;
     updateGpsStatus(s.accuracy);
-    document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
+    document.getElementById("distance").textContent = (totalDistance / 1000).toFixed(2);
 
     const localPoints = pathSegments.reduce((n, seg) => n + seg.length, 0) + currentSegment.length;
     const sameShape = s.segmentCount === pathSegments.length + 1 && s.gapCount === gapCoords.length;
@@ -171,6 +176,7 @@ function applyNativeSummary(s) {
     }
 
     if (guidedRun && s.guided) {
+        guidedRun.coachState = s.coach || null;
         guidedRun.currentSegmentIndex = s.guided.index;
         if (s.guided.index >= 0 && s.guided.index < guidedRun.segments.length) {
             renderGuidedPanel(s.guided.remainingMs / 1000);
@@ -178,6 +184,7 @@ function applyNativeSummary(s) {
     }
     if (ghostRace) updateGhostPanel();
     updateLockOverlay();
+    renderRunBar();
 }
 
 function syncNativeClock(s) {
@@ -208,6 +215,7 @@ function applyNativeSnapshot(run) {
     estimatedDistance = run.estimatedDistance;
     timeSeriesData = run.timeSeries || [];
     trackData = run.track || [];
+    runRatings = run.ratings || [];
     const segs = run.pathSegments && run.pathSegments.length ? run.pathSegments : [[]];
     pathSegments = segs.slice(0, -1);
     currentSegment = segs[segs.length - 1];
@@ -222,7 +230,7 @@ function redrawPath() {
         userMarker.setLatLng(last);
         map.setView(last, Math.max(map.getZoom(), 15));
     }
-    document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
+    document.getElementById("distance").textContent = (totalDistance / 1000).toFixed(2);
 }
 
 function nativePauseToggle() {
@@ -237,18 +245,17 @@ function nativePauseToggle() {
 }
 
 function setPausedUI(paused) {
-    const pauseButton = document.getElementById("pause");
     if (paused) {
         clearInterval(timerInterval);
         pausedTime = Date.now();
         isPaused = true;
-        pauseButton.innerHTML = '<span class="material-icons">play_arrow</span>';
     } else {
         startTime += (Date.now() - pausedTime);
         updateTimer();
         isPaused = false;
-        pauseButton.innerHTML = '<span class="material-icons">pause</span>';
     }
+    renderPauseButton(paused);
+    renderRunBar();
 }
 
 function nativeStop() {
@@ -290,5 +297,6 @@ function saveNativeSnapshot(run) {
         track: run.track || [],
         pathSegments: run.pathSegments || [],
         estimatedDistance: run.estimatedDistance,
+        ratings: run.ratings && run.ratings.length ? run.ratings : undefined,
     })));
 }

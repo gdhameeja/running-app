@@ -443,9 +443,239 @@ function enduranceExpertSessions() {
     return s;
 }
 
+// ─── Fun Run ───────────────────────────────────────────────────────────────────
+// Built to be enjoyed, never dreaded, and still a real workout:
+//  - The running in between stays easy enough to chat. Below the talk-test
+//    threshold exercise stays pleasant for most people (Ekkekakis' dual-mode
+//    theory); above it, pleasure drops.
+//  - The work comes from 10-30 s bursts (games, drills, strides), never
+//    all-out. Short bursts are enjoyed more than long or continuous hard
+//    efforts (Martinez et al. 2015), and strides build speed with little fatigue.
+//  - Every session is different (variety predicts sticking with exercise,
+//    Sylvester et al. 2016), and there are choices: you pick the landmark.
+//  - Smiling (Brick et al. 2018), self-talk (Blanchfield et al. 2014) and
+//    looking outward (Sturm et al. 2020) make effort feel easier.
+//  - Sessions finish gently with a celebration: how a session ends shapes how
+//    you remember it (Zenko, Ekkekakis & Ariely 2016).
+
+function spokenDuration(sec) {
+    if (sec < 60) return `${sec} seconds`;
+    const m = Math.floor(sec / 60), r = sec % 60;
+    const mins = `${m} minute${m > 1 ? "s" : ""}`;
+    return r ? `${mins} ${r} seconds` : mins;
+}
+
+// A segment with its own label for the screen and its own words to speak.
+function scripted(type, sec, intensity, label, say) {
+    return Object.assign(seg(type, sec / 60, intensity), { label, say });
+}
+
+// key: [seconds, type, label, what the coach says ({d} = duration)]
+const FUN_MOVES = {
+    handsUp: [10, "play", "Hands up!", "Hands up! Throw both arms up in the air like you just won something. Hold them high for {d}."],
+    powerArms: [20, "play", "Power arms", "Power arms! Pump your arms strong and fast and let your legs follow. {d}."],
+    quickFeet: [15, "play", "Quick feet", "Quick feet! Tiny, fast, light steps, like the ground is hot. {d}."],
+    highKnees: [15, "play", "High knees", "High knees! Lift those knees, light and bouncy. {d}."],
+    skip: [20, "play", "Skip!", "Skip like a kid! Big, bouncy skips for {d}. Nobody's judging."],
+    superhero: [30, "play", "Superhero", "Superhero posture! Run tall, chest proud, eyes on the horizon. {d}."],
+    smile: [30, "play", "Smile run", "Smile run! Put on a big smile for {d}. Smiling runners run more relaxed. Feel your shoulders drop."],
+    shake: [10, "play", "Shake it out", "Shake it out! Wiggle your hands and shoulders loose. {d}."],
+    ninja: [20, "play", "Ninja feet", "Ninja feet! Run as quietly as you can. Soft, silent landings for {d}."],
+    airPunch: [10, "play", "Air punches", "Air punches! Throw a few quick punches at the sky as you jog. {d}."],
+    selfTalk: [20, "play", "Say it!", "Say it out loud, or in your head: I am strong. I've got this. And again! {d}."],
+    highFive: [10, "play", "High five", "Give yourself a high five! Clap your hands. You're doing great."],
+    colourHunt: [60, "run", "Colour hunt", "Colour hunt! Keep jogging easy and spot five red things in the next minute. Go!"],
+    awe: [45, "run", "Look around", "Look up and around. Find the most beautiful thing you can see right now, and take it in."],
+    countSteps: [30, "run", "Count steps", "Counting game! Count your steps up to thirty, then start again. Out loud if nobody's around."],
+    breathe: [45, "run", "Breathe", "Breathing game. Breathe in for three steps, out for three steps. Find the rhythm."],
+};
+
+function funMove(key) {
+    const [sec, type, label, say] = FUN_MOVES[key];
+    return scripted(type, sec, "By feel", label, say.replace("{d}", spokenDuration(sec)));
+}
+
+// Fast but relaxed, never a sprint
+function funStride(sec, n) {
+    const says = [
+        `Stride! Build up smoothly to fast and relaxed, like you're flying, not fighting. ${spokenDuration(sec)}.`,
+        `Landmark game! Pick a tree or a lamppost up ahead and run to it, fast but relaxed. About ${spokenDuration(sec)}, you choose.`,
+        `Stride! Quick and smooth for ${spokenDuration(sec)}. Eight out of ten, not all out.`,
+    ];
+    return scripted("stride", sec, "Fast but relaxed", n % 3 === 1 ? "Landmark!" : "Stride", says[n % says.length]);
+}
+
+const CRUISE_LINES = [
+    "Back to easy running. Chatty pace.",
+    "Easy cruise. Enjoy the view.",
+    "Settle into your easy rhythm.",
+    "Easy jog. Walking is fine too.",
+    "Nice. Relax your shoulders and cruise.",
+    "Cruise. Breathe easy.",
+];
+
+function funCruise(sec, n) {
+    return scripted("run", sec, "Easy, chatty pace", "Easy cruise", `${CRUISE_LINES[n % CRUISE_LINES.length]} ${spokenDuration(sec)}.`);
+}
+
+const FUN_THEMES = [
+    { title: "Playground", moves: ["skip", "highKnees", "handsUp", "quickFeet", "highFive", "shake"] },
+    { title: "Treasure Hunt", moves: ["colourHunt", "handsUp", "awe", "countSteps", "highFive", "quickFeet"] },
+    { title: "Smile Miles", moves: ["smile", "selfTalk", "shake", "breathe", "highFive", "handsUp"] },
+    { title: "Ninja Run", moves: ["ninja", "quickFeet", "powerArms", "shake", "ninja", "highFive"] },
+    { title: "Superhero", moves: ["superhero", "powerArms", "handsUp", "selfTalk", "airPunch", "smile"] },
+    { title: "Party Run", moves: ["airPunch", "handsUp", "skip", "smile", "highFive", "shake"] },
+];
+
+// mainMin of easy running sprinkled with `games` moves and `strides` strides.
+function funSession(week, day, theme, mainMin, games, strides, strideSec) {
+    const items = [];
+    // Each time a theme comes round, its moves start somewhere new
+    for (let i = 0; i < games; i++) items.push(funMove(theme.moves[(i + week) % theme.moves.length]));
+    // Spread the strides through the middle, never right at the end
+    for (let k = 0; k < strides; k++) {
+        const at = Math.round((k + 1) * items.length / (strides + 1)) + k;
+        items.splice(Math.min(at, items.length - 1), 0, funStride(strideSec, k));
+    }
+    const busySec = items.reduce((sum, x) => sum + Math.round(x.duration * 60), 0);
+    const gap = Math.max(60, Math.round((mainMin * 60 - busySec) / (items.length + 1) / 15) * 15);
+
+    const segments = [
+        scripted("warmup", 240, "Easy jog", "Warm up",
+            `Welcome to ${theme.title}! Start with an easy jog, slow enough to chat. Walking is always allowed. ${spokenDuration(240)}.`),
+        funMove("shake"),
+    ];
+    items.forEach((x, i) => { segments.push(funCruise(gap, i)); segments.push(x); });
+    segments.push(funCruise(gap, items.length));
+    segments.push(scripted("play", 10, "By feel", "Victory!", "Victory finish! Both arms up, big smile. You did it!"));
+    segments.push(scripted("cooldown", 180, "Easy jog", "Cool down",
+        "Cool down. Walk or jog, your choice. Notice how good you feel right now, and remember it for next time."));
+
+    const total = Math.round(segments.reduce((sum, x) => sum + x.duration, 0));
+    const desc = `${total} min · ${games} games${strides ? ` · ${strides} strides` : ""}`;
+    return session(week, day, theme.title, "fun", desc, segments);
+}
+
+function funRunSessions(level) {
+    const s = [];
+    for (let w = 1; w <= 6; w++) {
+        for (let d = 1; d <= 3; d++) {
+            const theme = FUN_THEMES[((w - 1) * 3 + d - 1) % FUN_THEMES.length];
+            if (level === "beginner") {
+                s.push(funSession(w, d, theme, 16 + w, 5 + Math.floor(w / 2), w <= 2 ? 0 : w <= 4 ? 2 : 3, 20));
+            } else if (level === "intermediate") {
+                s.push(funSession(w, d, theme, 22 + Math.round(w * 1.5), 7 + Math.floor(w / 2), 3 + Math.floor(w / 3), 25));
+            } else {
+                s.push(funSession(w, d, theme, 30 + w * 2, 8 + Math.floor(w / 2), 5 + Math.floor(w / 3), 30));
+            }
+        }
+    }
+    return s;
+}
+
+// ─── Tune-In ───────────────────────────────────────────────────────────────────
+// Coached by how it feels: see coach.js. Each coached segment has a target
+// effort (1-5, talk-test anchored); the coach asks, nudges and adapts.
+
+function tuneIn(type, min, target, label, say, surges = false) {
+    return Object.assign(seg(type, min, `Aim for a ${target}: ${EFFORT_ANCHORS[target]}`), { label, say, target, surges });
+}
+
+function tuneWarmup(min) {
+    return tuneIn("warmup", min, 2, "Warm up",
+        `Warm up easy. Aim for a 2: ${EFFORT_ANCHORS[2]}. Every minute or so I'll ask how hard it feels, from 1, ${EFFORT_ANCHORS[1]}, to 5, ${EFFORT_ANCHORS[5]}. Tap the number on screen.`);
+}
+
+function tuneCooldown(min) {
+    return scripted("cooldown", min * 60, "Easy jog", "Cool down",
+        "Cool down. Walk or jog, whatever feels good. No more check-ins: the work is done.");
+}
+
+function tuneInSessions(level) {
+    const s = [];
+    const weeks = 4;
+    for (let w = 1; w <= weeks; w++) {
+        const main = level === "beginner" ? 12 + 2 * w : level === "intermediate" ? 20 + 3 * w : 28 + 4 * w;
+        const kinds = level === "beginner" ? ["sweet", "easy", "waves"] : ["sweet", "waves", "build"];
+        kinds.forEach((kind, i) => {
+            const d = i + 1;
+            if (kind === "sweet") {
+                s.push(session(w, d, "Sweet Spot", "tune", `${main} min at a 3, coached by feel`,
+                    [tuneWarmup(5), tuneIn("run", main, 3, "Sweet spot",
+                        `Main set. Aim for a 3: ${EFFORT_ANCHORS[3]}. When I ask, tell me honestly. I'll do the rest.`), tuneCooldown(5)]));
+            } else if (kind === "easy") {
+                s.push(session(w, d, "Easy Flow", "tune", `${main} min at a 2, coached by feel`,
+                    [tuneWarmup(5), tuneIn("run", main, 2, "Easy flow",
+                        `Easy day. Aim for a 2: ${EFFORT_ANCHORS[2]}. If it's ever more than that, I'll slow you down.`), tuneCooldown(3)]));
+            } else if (kind === "waves") {
+                s.push(session(w, d, "Waves", "tune", `${main} min at a 3 with surges that adapt to you`,
+                    [tuneWarmup(5), tuneIn("run", main, 3, "Waves",
+                        `Waves. Steady running at a 3, ${EFFORT_ANCHORS[3]}, with short surges when you're coping well. Your answers decide how long they are.`, true), tuneCooldown(5)]));
+            } else {
+                const third = Math.round(main / 3);
+                s.push(session(w, d, "Build", "tune", `${third * 3} min building from a 2 to a 4`,
+                    [tuneWarmup(5),
+                        tuneIn("run", third, 2, "Build: easy", `Build run. First part: aim for a 2, ${EFFORT_ANCHORS[2]}.`),
+                        tuneIn("run", third, 3, "Build: steady", `Step it up. Aim for a 3: ${EFFORT_ANCHORS[3]}.`),
+                        tuneIn("run", third, 4, "Build: strong", `Last part. Aim for a 4: ${EFFORT_ANCHORS[4]}. You're nearly there.`),
+                        tuneCooldown(5)]));
+            }
+        });
+    }
+    return s;
+}
+
 // ─── Export ────────────────────────────────────────────────────────────────────
 
 const COURSES = [
+    {
+        id: "fun-run",
+        name: "Fun Run",
+        icon: "🎉",
+        shortDescription: "Playful runs you'll look forward to",
+        description: "Easy, chatty running sprinkled with games and moves: hands in the air, skips, ninja feet, colour hunts, landmark strides. The bursts are short and never all-out, so it's a real workout that never feels scary. Every session is different, and walking is always allowed.",
+        levels: {
+            beginner: {
+                duration: 6, sessionsPerWeek: 3,
+                description: "~25-30 min: 5-8 games, strides from week 3",
+                sessions: funRunSessions("beginner")
+            },
+            intermediate: {
+                duration: 6, sessionsPerWeek: 3,
+                description: "~32-40 min: 7-10 games and 3-5 strides",
+                sessions: funRunSessions("intermediate")
+            },
+            expert: {
+                duration: 6, sessionsPerWeek: 3,
+                description: "~40-52 min: 8-11 games and 5-7 strides",
+                sessions: funRunSessions("expert")
+            }
+        }
+    },
+    {
+        id: "tune-in",
+        name: "Tune-In Runs",
+        icon: "🎚️",
+        shortDescription: "The run that listens to you",
+        description: "Every minute or so the coach asks how hard it feels, from 1 (you could sing) to 5 (you can't talk). Tell it you're maxed and it backs off straight away; tell it it's too easy and it pushes you, and adds surges when you're coping. Tap the number on the run screen, or Too easy / Just right / Too hard in the notification.",
+        levels: {
+            beginner: {
+                duration: 4, sessionsPerWeek: 3,
+                description: "14-20 min main sets: sweet spot, easy flow, waves",
+                sessions: tuneInSessions("beginner")
+            },
+            intermediate: {
+                duration: 4, sessionsPerWeek: 3,
+                description: "23-32 min main sets: sweet spot, waves, build",
+                sessions: tuneInSessions("intermediate")
+            },
+            expert: {
+                duration: 4, sessionsPerWeek: 3,
+                description: "32-44 min main sets: sweet spot, waves, build",
+                sessions: tuneInSessions("expert")
+            }
+        }
+    },
     {
         id: "hiit-sprint",
         name: "HIIT Sprint",

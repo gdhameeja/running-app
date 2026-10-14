@@ -109,6 +109,55 @@ const RunAnalysis = (() => {
         return out;
     }
 
+    // A run's series from the start line to the finish: older runs' splits
+    // begin at 100 m and stop at the last 100 m, so add both ends.
+    function completeSeries(run) {
+        let ts = seriesForRun(run);
+        if (!ts) return null;
+        if (ts[0].distance > 0) ts = [{ distance: 0, time: 0 }].concat(ts);
+        const last = ts[ts.length - 1];
+        if (run.time > 0 && last.distance < run.distance - 1 && run.time * 1000 > last.time) {
+            ts = ts.concat([{ distance: run.distance, time: run.time * 1000 }]);
+        }
+        return ts;
+    }
+
+    // The fastest stretch of `targetM` metres anywhere in a series, as
+    // { startM, timeMs }, or null if the series is shorter than that.
+    function bestEffort(ts, targetM) {
+        if (!ts || ts.length < 2 || ts[ts.length - 1].distance < targetM) return null;
+        let best = null;
+        for (const p of ts) {
+            const end = timeAtDistance(ts, p.distance + targetM);
+            if (end == null) break;
+            if (!best || end - p.time < best.timeMs) best = { startM: p.distance, timeMs: end - p.time };
+        }
+        return best;
+    }
+
+    // A run's best effort over `targetM`. Runs without timing data are assumed
+    // to have been run at an even pace (`even: true`).
+    function runBestEffort(run, targetM) {
+        if (!run || !(run.distance >= targetM) || !(run.time > 0)) return null;
+        const best = bestEffort(completeSeries(run), targetM);
+        return best || { startM: 0, timeMs: run.time * 1000 * targetM / run.distance, even: true };
+    }
+
+    // The part of a series from `startM` on, re-zeroed so it starts at 0 m, 0 ms.
+    function sliceSeries(ts, startM) {
+        const t0 = timeAtDistance(ts, startM);
+        if (t0 == null) return null;
+        const first = { distance: 0, time: 0 };
+        const p0 = pointAtDistance(ts, startM);
+        if (p0) { first.lat = p0[0]; first.lng = p0[1]; }
+        const out = [first];
+        for (const p of ts) {
+            if (p.distance <= startM) continue;
+            out.push(Object.assign({}, p, { distance: p.distance - startM, time: p.time - t0 }));
+        }
+        return out;
+    }
+
     // ─── Splits, stops and pace colouring ────────────────────────────────────
 
     // Time for each full kilometre, plus the final partial one.
@@ -353,6 +402,9 @@ const RunAnalysis = (() => {
 
     // What a segment asks for, as a pace range in multiples of 5K pace.
     function segmentTarget(seg) {
+        // Tune-In segments are coached by feel; Fun Run games and strides are never judged
+        if (seg.target != null) return { kind: "feel", label: `Effort ${seg.target} of 5, by feel` };
+        if (seg.type === "play" || seg.type === "stride") return { kind: "feel", label: seg.label || "Play" };
         const t = (seg.intensity || "").toLowerCase();
         if (seg.type === "rest") return { kind: "rest", label: "Rest" };
         if (seg.type === "walk") return { kind: "walk", label: "Brisk walk", absolute: [450, 780] };
@@ -444,7 +496,7 @@ const RunAnalysis = (() => {
 
     return {
         seriesFromTrack, seriesForRun, evenPaceSeries, distanceAtTime, timeAtDistance, pointAtDistance,
-        sparseSeries, kmSplits, findStops, paceSegments, quantile, metres,
+        sparseSeries, completeSeries, bestEffort, runBestEffort, sliceSeries, kmSplits, findStops, paceSegments, quantile, metres,
         routeSignature, coverage, sameRoute, groupRoutes, rankRoute,
         ghostCue, spokenMetres, CUE_EVERY_M,
         fiveKPace, segmentTarget, guidedReport, parseDuration, formatDistance,

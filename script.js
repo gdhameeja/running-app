@@ -1,24 +1,3 @@
-class KalmanFilter {
-    constructor(processNoise, initialEstimate) {
-        this.processNoise = processNoise;
-        this.estimateError = 1;
-        this.estimate = initialEstimate;
-    }
-
-    update(measurement, accuracyMeters) {
-        // Weight measurement by GPS-reported accuracy
-        // Convert meters to degrees (1° lat ≈ 111320m), then square for variance
-        const accuracyDeg = accuracyMeters / 111320;
-        const measurementNoise = accuracyDeg * accuracyDeg;
-
-        this.estimateError += this.processNoise;
-        const kalmanGain = this.estimateError / (this.estimateError + measurementNoise);
-        this.estimate += kalmanGain * (measurement - this.estimate);
-        this.estimateError *= (1 - kalmanGain);
-        return this.estimate;
-    }
-}
-
 let map, userMarker, pathLine;
 let watchId;
 let totalDistance = 0;
@@ -33,8 +12,11 @@ let elapsedTime = 0;
 let isPaused = false;
 let pausedTime = 0;
 
-let kalmanLat = null;
-let kalmanLon = null;
+let gpsFilter = null;
+// Smoothed speed from the GPS filter, for the live pace readout: { mps, at }
+let currentSpeed = null;
+// Effort check-ins during a Tune-In run: [[moving ms, rating 1-5]]
+let runRatings = [];
 let lastFixTime = null;
 
 let db;
@@ -192,24 +174,26 @@ function findPreviousTime(timeSeries, currentDistance) {
     return null;
 }
 
+// Turns the run screen into the finished run's summary.
 function displayRunSummary(run) {
-    const summaryElement = document.createElement("div");
-    summaryElement.className = "run-summary";
+    document.getElementById("distance").textContent = (run.distance / 1000).toFixed(2);
+    document.getElementById("time").textContent = formatDuration(run.time);
+    document.getElementById("pace").textContent = run.distance > 0 ? formatPace(run.pace) : "--:--";
+    const summaryElement = document.getElementById("rs-summary");
     summaryElement.innerHTML = `
-        <h3>Run Summary</h3>
-        <p>Date: ${new Date(run.startTime).toLocaleString()}</p>
-        <p>Distance: ${(run.distance / 1000).toFixed(2)} km</p>
-        <p>Time: ${formatTime(Math.floor(run.time))}</p>
-        <p>Average Pace: ${formatTime(Math.floor(run.pace))} /km</p>
+        <div class="rs-summary-title">Run complete · ${formatRunDate(run.startTime)}</div>
         ${run.estimatedDistance > 50 ? `<p class="summary-note">${(run.estimatedDistance / 1000).toFixed(2)} km was estimated in straight lines across GPS gaps (screen off or app in background), so the real distance is probably a little higher.</p>` : ""}
-        <p class="summary-extra"></p>
-        <button class="btn-small summary-details">View details</button>
-    `;
-    const container = document.getElementById("tab-track");
-    const existingSummary = container.querySelector(".run-summary");
-    if (existingSummary) existingSummary.remove();
-    container.appendChild(summaryElement);
-    summaryElement.querySelector(".summary-details").addEventListener("click", () => openRunDetail(run.runId));
+        <p class="summary-extra"></p>`;
+    summaryRunId = run.runId;
+    setRunScreenState("finished");
+    openRunScreen();
+    // Show the whole route
+    const points = (run.pathSegments || []).flat().filter(p => p && p.length === 2);
+    if (points.length > 1) {
+        pathLine.setLatLngs(run.pathSegments.filter(seg => seg.length));
+        setTimeout(() => map.fitBounds(L.latLngBounds(points), { padding: [24, 24], maxZoom: 17 }), 100);
+    }
+    renderHomeRecent();
 
     // Route ranking and workout result, once the other runs are loaded
     getAllRuns().then(all => {
@@ -225,6 +209,10 @@ function displayRunSummary(run) {
         if (run.guided) {
             const rep = RunAnalysis.guidedReport(run, run.guided, RunAnalysis.fiveKPace(runs, run.startTime));
             if (rep && rep.judged) lines.push(`Workout: ${rep.onTarget} of ${rep.judged} segments on target.`);
+        }
+        if (run.ratings && run.ratings.length) {
+            const avg = run.ratings.reduce((sum, x) => sum + x[1], 0) / run.ratings.length;
+            lines.push(`You checked in ${run.ratings.length} times · average effort ${avg.toFixed(1)} of 5.`);
         }
         summaryElement.querySelector(".summary-extra").innerHTML = lines.join("<br>");
     }).catch(() => {});
@@ -242,6 +230,8 @@ document.addEventListener("DOMContentLoaded", () => {
         })
         .then(() => {
             checkForInterruptedRun();
+            renderHomeRecent();
+            updateHomeGpsWatch();
         })
         .catch(error => console.error("Failed to initialize database:", error));
 });
@@ -251,15 +241,17 @@ function initMap() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
-    userMarker = L.marker([0, 0]).addTo(map).bindPopup("You");
+    userMarker = L.marker([0, 0]).addTo(map);
     pathLine = L.polyline([], { color: "red", weight: 4 }).addTo(map);
     gapLine = L.polyline([], { color: "#999", weight: 2, dashArray: "8,8", opacity: 0.5 }).addTo(map);
     setTimeout(() => map.invalidateSize(), 500);
+    // The map moves between the Run tab and the run screen, which size it differently
+    if (window.ResizeObserver) new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById("map"));
     navigator.geolocation.getCurrentPosition(
         (position) => {
             const { latitude, longitude } = position.coords;
             map.setView([latitude, longitude], 15);
-            userMarker.setLatLng([latitude, longitude]).openPopup();
+            userMarker.setLatLng([latitude, longitude]);
         },
         (error) => console.warn("Could not get initial position:", error.message),
         { enableHighAccuracy: true, timeout: 10000 }
@@ -285,11 +277,21 @@ function initTabs() {
             if (tab.dataset.tab === "courses") {
                 refreshActiveBanner();
             }
+            if (tab.dataset.tab === "history") {
+                renderHistory();
+            }
             if (tab.dataset.tab === "track") {
                 setTimeout(() => map.invalidateSize(), 100);
+                renderHomeRecent();
             }
+            updateHomeGpsWatch();
         });
     });
+}
+
+function showTab(name) {
+    const tab = document.querySelector(`.tab[data-tab="${name}"]`);
+    if (tab && !tab.classList.contains("active")) tab.click();
 }
 
 // ─── Run Tracking (start/pause/stop) ──────────────────────────────────────────
@@ -311,19 +313,23 @@ document.getElementById("start").addEventListener("click", () => {
     timeSeriesData = [];
     trackData = [];
     lastGpsMotion = null;
+    currentSpeed = null;
+    runRatings = [];
     lastTimeSeriesDistance = 0;
     lastTimeSeriesTime = 0;
 
-    document.getElementById("distance").textContent = "0.00 kms";
+    document.getElementById("distance").textContent = "0.00";
     document.getElementById("time").textContent = "0:00";
-    document.getElementById("pace").textContent = "0:00 /km";
+    document.getElementById("pace").textContent = "--:--";
+    renderCurrentPace();
+    document.getElementById("rs-summary").innerHTML = "";
+    setRunScreenState("running");
+    openRunScreen();
+    updateHomeGpsWatch();
 
     if (pathLine) pathLine.setLatLngs([]);
     if (gapLine) gapLine.setLatLngs([]);
     if (ghostMarker) { map.removeLayer(ghostMarker); ghostMarker = null; }
-
-    const existingSummary = document.querySelector(".run-summary");
-    if (existingSummary) existingSummary.remove();
 
     getLatestRun()
         .then(previousRun => {
@@ -350,8 +356,7 @@ document.getElementById("start").addEventListener("click", () => {
             updateTimer();
             isPaused = false;
             pausedTime = 0;
-            kalmanLat = null;
-            kalmanLon = null;
+            gpsFilter = null;
             lastFixTime = null;
             document.getElementById("pause").disabled = false;
             document.getElementById("start").disabled = true;
@@ -380,38 +385,61 @@ document.getElementById("start").addEventListener("click", () => {
                 return;
             }
             document.getElementById("start").disabled = false;
+            closeRunScreen();
         });
 });
 
 document.getElementById("pause").addEventListener("click", () => {
     if (nativeRun) return nativePauseToggle();
-    const pauseButton = document.getElementById("pause");
     if (!isPaused) {
         navigator.geolocation.clearWatch(watchId);
         clearInterval(timerInterval);
         pausedTime = Date.now();
         isPaused = true;
-        pauseButton.innerHTML = '<span class="material-icons">play_arrow</span>';
+        renderPauseButton(true);
+        renderRunBar();
         if (guidedRun) pauseGuidedRun();
     } else {
         startTime += (Date.now() - pausedTime);
         lastMilestoneTime += (Date.now() - pausedTime);
         prevPosition = null;
-        kalmanLat = null;
-        kalmanLon = null;
+        gpsFilter = null;
         updateTimer();
         watchId = startTracking();
         isPaused = false;
-        pauseButton.innerHTML = '<span class="material-icons">pause</span>';
+        renderPauseButton(false);
         if (guidedRun) resumeGuidedRun();
     }
 });
 
-document.getElementById("stop").addEventListener("click", () => {
+function stopRun() {
     if (nativeRun) return nativeStop();
     navigator.geolocation.clearWatch(watchId);
     endRun(Date.now());
-});
+}
+
+// Finishing needs a 1 s hold, so a stray tap (or a pocket) can't end the run.
+(function initHoldToFinish() {
+    const btn = document.getElementById("stop");
+    const label = btn.querySelector(".btn-label");
+    let timer = null;
+    const cancel = () => {
+        clearTimeout(timer);
+        timer = null;
+        btn.classList.remove("holding");
+        label.textContent = "Hold to finish";
+    };
+    btn.addEventListener("pointerdown", e => {
+        if (btn.disabled) return;
+        e.preventDefault();
+        btn.classList.add("holding");
+        label.textContent = "Keep holding…";
+        timer = setTimeout(() => { cancel(); stopRun(); }, 1000);
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach(ev => btn.addEventListener(ev, cancel));
+    btn.addEventListener("contextmenu", e => e.preventDefault());
+    btn.addEventListener("click", () => { if (!timer) showToast("Hold the button to finish your run.", 2500); });
+})();
 
 // Resets the run UI and saves the finished run. Returns a promise.
 function endRun(endTime) {
@@ -421,13 +449,15 @@ function endRun(endTime) {
     stopBackgroundAudio();
     hideLockOverlay();
     updateGpsStatus(null);
+    currentSpeed = null;
+    renderCurrentPace();
     watchId = null;
     if (ghostMarker) { map.removeLayer(ghostMarker); ghostMarker = null; }
     document.getElementById("lock-screen").disabled = true;
     document.getElementById("start").disabled = false;
     document.getElementById("stop").disabled = true;
     document.getElementById("pause").disabled = true;
-    document.getElementById("pause").innerHTML = '<span class="material-icons">pause</span>';
+    renderPauseButton(false);
 
     if (isPaused) startTime += (endTime - pausedTime);
     isPaused = false;
@@ -446,7 +476,7 @@ function endRun(endTime) {
     const runTime = (endTime - startTime) / 1000;
     const pace = totalDistance > 0 ? (runTime / (totalDistance / 1000)) : 0;
 
-    if (!currentRunId) return Promise.resolve();
+    if (!currentRunId) { closeRunScreen(); return Promise.resolve(); }
     return getRunById(currentRunId)
         .then(runData => {
             runData = runData || { runId: currentRunId, startTime: startTime };
@@ -458,6 +488,7 @@ function endRun(endTime) {
             runData.track = trackData;
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
+            if (runRatings.length) runData.ratings = runRatings;
             return updateRun(runData).then(() => displayRunSummary(runData));
         })
         .catch(error => console.error("Error updating run:", error));
@@ -546,6 +577,7 @@ function autoSaveRun() {
             runData.track = trackData;
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
+            if (runRatings.length) runData.ratings = runRatings;
             store.put(runData);
         }
     };
@@ -627,6 +659,7 @@ function updateLockOverlay() {
     document.getElementById("lock-distance").textContent = (totalDistance / 1000).toFixed(2);
     document.getElementById("lock-time").textContent = document.getElementById("time").textContent;
     document.getElementById("lock-pace").textContent = document.getElementById("pace").textContent;
+    document.getElementById("lock-current-pace").textContent = document.getElementById("current-pace").textContent;
     const ghostEl = document.getElementById("lock-ghost");
     ghostEl.textContent = ghostRace ? document.getElementById("ghost-diff").textContent : "";
     const grEl = document.getElementById("lock-guided");
@@ -669,26 +702,36 @@ function updateGpsStatus(accuracy) {
     el.className = good ? "gps-good" : "gps-weak";
 }
 
-function showToast(text) {
+function showToast(text, ms = 10000) {
     const toast = document.getElementById("toast");
     toast.textContent = text;
     toast.style.display = "block";
     clearTimeout(showToast._t);
-    showToast._t = setTimeout(() => { toast.style.display = "none"; }, 10000);
+    showToast._t = setTimeout(() => { toast.style.display = "none"; }, ms);
 }
 
 function updateTimer() {
     clearInterval(timerInterval);
     timerInterval = setInterval(() => {
         elapsedTime = ((Date.now() - startTime) / 1000);
-        document.getElementById("time").textContent = formatTime(Math.floor(elapsedTime));
+        document.getElementById("time").textContent = formatDuration(elapsedTime);
         if (totalDistance > 0) {
             const paceInSeconds = (elapsedTime / (totalDistance / 1000));
-            document.getElementById("pace").textContent = `${formatTime(Math.floor(paceInSeconds))} /km`;
+            document.getElementById("pace").textContent = formatPace(paceInSeconds);
         }
+        renderCurrentPace();
         if (ghostRace) updateGhostPanel();
         updateLockOverlay();
+        renderRunBar();
     }, 1000);
+}
+
+// Pace right now from the GPS filter's smoothed speed. Blank when you're
+// paused, standing (slower than ~20 min/km) or the last fix is stale.
+function renderCurrentPace() {
+    const s = currentSpeed;
+    const live = s && !isPaused && Date.now() - s.at < 5000 && s.mps >= 0.8;
+    document.getElementById("current-pace").textContent = live ? formatPace(1000 / s.mps) : "--:--";
 }
 
 function formatTime(seconds) {
@@ -742,13 +785,13 @@ function startTracking() {
         const gpsBearing = Number.isFinite(position.coords.heading) ? position.coords.heading : null;
         lastGpsMotion = { speed: gpsSpeed, bearing: gpsBearing, at: now };
 
-        if (!kalmanLat) {
-            kalmanLat = new KalmanFilter(0.0001, latitude);
-            kalmanLon = new KalmanFilter(0.0001, longitude);
-        }
-
-        latitude = kalmanLat.update(latitude, accuracy);
-        longitude = kalmanLon.update(longitude, accuracy);
+        // After a GPS gap the old velocity says nothing about where you are now
+        if (!gpsFilter || (rawGapStart != null && now - rawGapStart > GAP_THRESHOLD_MS)) gpsFilter = new GpsFilter();
+        const filtered = gpsFilter.update(latitude, longitude, accuracy, now, gpsSpeed, gpsBearing);
+        if (!filtered) return; // a glitch, far from where the filter expects you
+        latitude = filtered.lat;
+        longitude = filtered.lng;
+        currentSpeed = { mps: filtered.speed, at: now };
 
         if (!prevPosition) {
             // First fix of the run, or first fix after resuming from pause
@@ -780,8 +823,6 @@ function startTracking() {
                 currentSegment = [[latitude, longitude]];
                 prevPosition = { lat: latitude, lon: longitude };
                 lastFixTime = now;
-                kalmanLat = new KalmanFilter(0.0001, latitude);
-                kalmanLon = new KalmanFilter(0.0001, longitude);
                 addTrackPoint(now, latitude, longitude, gpsSpeed, gpsBearing);
             }
             return;
@@ -797,8 +838,6 @@ function startTracking() {
             gapLine.setLatLngs(gapCoords);
             currentSegment = [[latitude, longitude]];
             estimatedDistance += dist;
-            kalmanLat = new KalmanFilter(0.0001, latitude);
-            kalmanLon = new KalmanFilter(0.0001, longitude);
         } else {
             currentSegment.push([latitude, longitude]);
         }
@@ -806,7 +845,7 @@ function startTracking() {
 
         totalDistance += dist;
         addTrackPoint(now, latitude, longitude, gpsSpeed, gpsBearing);
-        document.getElementById("distance").textContent = `${(totalDistance / 1000).toFixed(2)} kms`;
+        document.getElementById("distance").textContent = (totalDistance / 1000).toFixed(2);
         pathLine.setLatLngs([...pathSegments, currentSegment]);
         userMarker.setLatLng([latitude, longitude]);
         map.setView([latitude, longitude]);
@@ -926,12 +965,6 @@ function startGhostRaceMode(spec) {
             cue: {},
         };
 
-        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-        document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
-        document.querySelector('[data-tab="track"]').classList.add("active");
-        document.getElementById("tab-track").classList.add("active");
-        setTimeout(() => map.invalidateSize(), 100);
-
         showGhostPanel(ghostRace.label, ghostRace.ghostPace);
         document.getElementById("start").click();
     }).catch(err => alert("Couldn't set up that ghost: " + (err && err.message || err)));
@@ -1019,69 +1052,204 @@ function updateGhostPanel() {
     }
 }
 
-// ─── Previous Runs Table ───────────────────────────────────────────────────────
+// ─── Run history ─────────────────────────────────────────────────────────────
 
-let currentPage = 0;
-let currentPageSize = 10;
-let sortedRuns = [];
+const HISTORY_PAGE = 20;
+let historyShown = HISTORY_PAGE;
+
+function formatRunDate(t) {
+    const d = new Date(t);
+    return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) +
+        " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+// 1:05:09 for an hour or more, otherwise 54:27
+function formatDuration(seconds) {
+    const s = Math.floor(seconds);
+    if (s < 3600) return formatTime(s);
+    return `${Math.floor(s / 3600)}:${formatTime(s % 3600).padStart(5, "0")}`;
+}
+
+function runCardHtml(run) {
+    const tag = run.guided ? run.guided.title : run.ghost ? `vs ${run.ghost.label || "ghost"}` : "";
+    return `
+        <button class="run-card" data-id="${run.runId}" ${run.endTime ? "" : "disabled"}>
+            <div class="run-card-top">
+                <span class="run-card-date">${formatRunDate(run.startTime)}</span>
+                ${tag ? `<span class="run-card-tag">${escapeHtml(tag)}</span>` : ""}
+                ${run.endTime ? "" : '<span class="run-card-tag warn">unfinished</span>'}
+            </div>
+            <div class="run-card-stats">
+                <span><b>${(run.distance / 1000).toFixed(2)}</b> km</span>
+                <span><b>${formatDuration(run.time || 0)}</b></span>
+                <span><b>${run.distance > 0 && run.pace ? formatPace(run.pace) : "--:--"}</b> /km</span>
+            </div>
+        </button>`;
+}
+
+function bindRunCards(container) {
+    container.querySelectorAll(".run-card").forEach(b =>
+        b.addEventListener("click", () => openRunDetail(Number(b.dataset.id))));
+}
+
+function renderHistory() {
+    const el = document.getElementById("history-list");
+    loadAllRuns().then(all => {
+        // The run in progress lives in the run bar, not here
+        const runs = all.filter(r => !(isRunLive() && r.runId === currentRunId));
+        if (!runs.length) {
+            el.innerHTML = '<p class="empty-note">No runs yet. Your runs will show up here.</p>';
+            return;
+        }
+        el.innerHTML = runs.slice(0, historyShown).map(runCardHtml).join("") +
+            (runs.length > historyShown ? '<button class="btn-small history-more">Show more</button>' : "");
+        bindRunCards(el);
+        const more = el.querySelector(".history-more");
+        if (more) more.addEventListener("click", () => { historyShown += HISTORY_PAGE; renderHistory(); });
+    });
+}
+
+// The last few runs under the Start button
+function renderHomeRecent() {
+    const el = document.getElementById("home-recent");
+    loadAllRuns().then(runs => {
+        const done = runs.filter(r => r.endTime).slice(0, 3);
+        if (!done.length) { el.innerHTML = ""; return; }
+        el.innerHTML = `<div class="section-head"><h3>Recent runs</h3><button class="link-btn" id="home-all">See all</button></div>` +
+            done.map(runCardHtml).join("");
+        bindRunCards(el);
+        document.getElementById("home-all").addEventListener("click", () => showTab("history"));
+    });
+}
 
 function loadAllRuns() {
     return getAllRuns().then(runs => runs.sort((a, b) => b.startTime - a.startTime));
 }
 
-function renderPreviousRunsTable() {
-    const container = document.getElementById("previous-runs-container");
-    container.innerHTML = "";
-    const startIdx = currentPage * currentPageSize;
-    const pageRuns = sortedRuns.slice(startIdx, startIdx + currentPageSize);
+// ─── Run screen ────────────────────────────────────────────────────────────────
+// Full screen while a run is in progress ("running"/"paused"), then the
+// finished run's summary ("finished"). Back (or the chevron) minimises a live
+// run to a bar on top of the tabs; it keeps going.
 
-    if (pageRuns.length === 0) {
-        container.innerHTML = "<p>No runs found.</p>";
-        return;
-    }
+let summaryRunId = null;
 
-    let table = `<table border="1" cellpadding="5" cellspacing="0">
-        <tr><th>Date</th><th>Distance (km)</th><th>Time</th><th>Pace (/km)</th><th></th></tr>`;
-    pageRuns.forEach(run => {
-        table += `<tr>
-            <td>${new Date(run.startTime).toLocaleString()}</td>
-            <td>${(run.distance / 1000).toFixed(2)}</td>
-            <td>${formatTime(Math.floor(run.time))}</td>
-            <td>${formatTime(Math.floor(run.pace))}</td>
-            <td>${run.endTime ? `<button class="btn-small run-details" data-id="${run.runId}">Details</button>` : ""}</td>
-        </tr>`;
-    });
-    table += `</table>`;
-    container.innerHTML = table;
-    container.querySelectorAll(".run-details").forEach(b =>
-        b.addEventListener("click", () => openRunDetail(Number(b.dataset.id))));
+function runScreen() { return document.getElementById("run-screen"); }
 
-    document.getElementById("prevPage").disabled = currentPage === 0;
-    document.getElementById("nextPage").disabled = (startIdx + currentPageSize) >= sortedRuns.length;
+function isRunScreenOpen() { return runScreen().style.display !== "none"; }
+
+function setRunScreenState(state) {
+    runScreen().dataset.state = state;
 }
 
-document.getElementById("showPreviousRuns").addEventListener("click", () => {
-    loadAllRuns().then(runs => {
-        sortedRuns = runs;
-        currentPage = 0;
-        renderPreviousRunsTable();
-        document.getElementById("previousRunsSection").style.display = "block";
-    });
+function placeMap(slotId) {
+    const slot = document.getElementById(slotId);
+    const el = document.getElementById("map");
+    if (el.parentNode !== slot) slot.appendChild(el);
+    if (map) setTimeout(() => map.invalidateSize(), 50);
+}
+
+function openRunScreen() {
+    const el = runScreen();
+    if (!isRunScreenOpen()) {
+        el.style.display = "flex";
+        document.body.classList.add("rs-open");
+        try { if (!(history.state && history.state.runScreen)) history.pushState({ runScreen: true }, ""); } catch (e) { /* not allowed here */ }
+    }
+    placeMap("rs-map-slot");
+    renderRunBar();
+}
+
+// Hides the run screen; a live run stays reachable from the bar.
+function minimiseRunScreen(fromHistory) {
+    if (!isRunScreenOpen()) return;
+    runScreen().style.display = "none";
+    document.body.classList.remove("rs-open");
+    placeMap("home-map-slot");
+    if (!fromHistory && history.state && history.state.runScreen) history.back();
+    if (runScreen().dataset.state === "finished") resetRunScreen();
+    renderRunBar();
+    updateHomeGpsWatch();
+}
+
+function closeRunScreen() {
+    setRunScreenState("finished");
+    minimiseRunScreen(false);
+}
+
+function resetRunScreen() {
+    summaryRunId = null;
+    document.getElementById("rs-summary").innerHTML = "";
+    document.getElementById("guided-run-panel").style.display = "none";
+    document.getElementById("ghost-panel").style.display = "none";
+    if (pathLine) pathLine.setLatLngs([]);
+    if (gapLine) gapLine.setLatLngs([]);
+}
+
+function isRunLive() {
+    return document.getElementById("start").disabled;
+}
+
+function renderRunBar() {
+    const bar = document.getElementById("run-bar");
+    const show = isRunLive() && !isRunScreenOpen();
+    bar.style.display = show ? "flex" : "none";
+    if (show) {
+        document.getElementById("run-bar-text").textContent =
+            `${isPaused ? "Paused" : "Running"} · ${(totalDistance / 1000).toFixed(2)} km · ${document.getElementById("time").textContent}`;
+    }
+}
+
+function renderPauseButton(paused) {
+    document.getElementById("pause").innerHTML = paused
+        ? '<span class="material-icons">play_arrow</span><span class="btn-label">Resume</span>'
+        : '<span class="material-icons">pause</span><span class="btn-label">Pause</span>';
+    runScreen().dataset.state = paused ? "paused" : "running";
+}
+
+document.getElementById("run-bar").addEventListener("click", openRunScreen);
+document.getElementById("rs-minimise").addEventListener("click", () => minimiseRunScreen(false));
+document.getElementById("rs-done-btn").addEventListener("click", () => closeRunScreen());
+document.getElementById("rs-details").addEventListener("click", () => { if (summaryRunId) openRunDetail(summaryRunId); });
+
+window.addEventListener("popstate", () => {
+    // Back from the run detail page lands on the run screen's entry: stay
+    if (history.state && history.state.runScreen) return;
+    if (isRunScreenOpen()) minimiseRunScreen(true);
 });
 
-document.getElementById("pageSizeSelect").addEventListener("change", (e) => {
-    currentPageSize = parseInt(e.target.value);
-    currentPage = 0;
-    renderPreviousRunsTable();
-});
+// ─── GPS status before a run ──────────────────────────────────────────────────
+// Watches GPS only while the Run tab is on screen and no run is going, so you
+// can see when it's locked on before you start.
 
-document.getElementById("prevPage").addEventListener("click", () => {
-    if (currentPage > 0) { currentPage--; renderPreviousRunsTable(); }
-});
+let homeGpsWatch = null;
 
-document.getElementById("nextPage").addEventListener("click", () => {
-    if ((currentPage + 1) * currentPageSize < sortedRuns.length) { currentPage++; renderPreviousRunsTable(); }
-});
+function updateHomeGpsWatch() {
+    const want = !isRunLive() && !document.hidden &&
+        document.getElementById("tab-track").classList.contains("active") && !isRunScreenOpen();
+    if (want && homeGpsWatch == null && navigator.geolocation) {
+        const el = document.getElementById("home-gps");
+        el.textContent = "Finding GPS…";
+        el.className = "home-gps";
+        homeGpsWatch = navigator.geolocation.watchPosition(pos => {
+            const acc = Math.round(pos.coords.accuracy);
+            const good = pos.coords.accuracy <= MAX_ACCURACY_M;
+            el.textContent = good ? `GPS ready · ±${acc} m` : `Weak GPS · ±${acc} m — move into the open`;
+            el.className = "home-gps " + (good ? "gps-good" : "gps-weak");
+            if (map && !isRunLive()) {
+                userMarker.setLatLng([pos.coords.latitude, pos.coords.longitude]);
+                map.setView([pos.coords.latitude, pos.coords.longitude], Math.max(map.getZoom(), 15));
+            }
+        }, err => {
+            el.textContent = err.code === err.PERMISSION_DENIED ? "Location is off — allow it to track runs" : "Finding GPS…";
+            el.className = "home-gps gps-weak";
+        }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+    } else if (!want && homeGpsWatch != null) {
+        navigator.geolocation.clearWatch(homeGpsWatch);
+        homeGpsWatch = null;
+    }
+}
+
+document.addEventListener("visibilitychange", updateHomeGpsWatch);
 
 // ─── Courses UI ────────────────────────────────────────────────────────────────
 
@@ -1136,9 +1304,10 @@ function updateLevelView() {
 
     getCourseProgress(selectedCourseId).then(progress => {
         const startBtn = document.getElementById("start-course");
+        startBtn.style.display = "";
         if (progress && progress.level === selectedLevel) {
-            startBtn.textContent = "Continue Course";
-            startBtn.disabled = false;
+            // The "Up next" card takes over
+            startBtn.style.display = "none";
         } else if (progress) {
             startBtn.textContent = `Already enrolled at ${progress.level}`;
             startBtn.disabled = true;
@@ -1150,59 +1319,113 @@ function updateLevelView() {
     });
 }
 
+function sessionMinutes(sess) {
+    return Math.round((sess.segments || []).reduce((sum, seg) => sum + seg.duration, 0));
+}
+
+// The first session not done yet, or -1 when the course is finished.
+function nextSessionIndex(level, progress) {
+    const done = new Set((progress ? progress.completedSessions : []).map(s => s.sessionIndex));
+    return level.sessions.findIndex((_, i) => !done.has(i));
+}
+
+// A card with one big button to start a session.
+function upNextHtml(course, levelKey, idx) {
+    const sess = course.levels[levelKey].sessions[idx];
+    return `
+        <div class="up-next-card">
+            <div class="up-next-label">Up next · Week ${sess.week}, day ${sess.day}</div>
+            <div class="up-next-title">${sess.title}</div>
+            <div class="up-next-meta">${sessionMinutes(sess)} min · ${sess.description}</div>
+            <button class="up-next-start guided-run-btn" data-idx="${idx}" data-course="${course.id}" data-level="${levelKey}">
+                <span class="material-icons">play_arrow</span> Start guided run
+            </button>
+        </div>`;
+}
+
+function bindGuidedButtons(container) {
+    container.querySelectorAll(".guided-run-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            startGuidedRun(btn.dataset.course, btn.dataset.level, parseInt(btn.dataset.idx));
+        });
+    });
+}
+
 function renderSessionList(course, levelKey, progress) {
     const level = course.levels[levelKey];
     const container = document.getElementById("session-list");
     container.innerHTML = "";
 
-    const completedIndices = progress && progress.level === levelKey
+    const enrolled = progress && progress.level === levelKey;
+    const completedIndices = enrolled
         ? new Set(progress.completedSessions.map(s => s.sessionIndex))
         : new Set();
+    const next = enrolled ? nextSessionIndex(level, progress) : -1;
 
-    let currentWeek = 0;
+    const upNext = document.getElementById("up-next");
+    upNext.innerHTML = next >= 0 ? upNextHtml(course, levelKey, next)
+        : enrolled ? '<div class="up-next-card done">🎉 Course complete!</div>' : "";
+    bindGuidedButtons(upNext);
+
+    // One collapsible block per week; the week you're on (or week 1) starts open
+    const openWeek = next >= 0 ? level.sessions[next].week : 1;
+    const weeks = new Map();
     level.sessions.forEach((sess, idx) => {
-        if (sess.week !== currentWeek) {
-            currentWeek = sess.week;
-            const header = document.createElement("div");
-            header.className = "session-week-header";
-            header.textContent = `Week ${currentWeek}`;
-            container.appendChild(header);
-        }
+        if (!weeks.has(sess.week)) weeks.set(sess.week, []);
+        weeks.get(sess.week).push(idx);
+    });
 
-        const isCompleted = completedIndices.has(idx);
-        const card = document.createElement("div");
-        card.className = `session-card type-${sess.type}${isCompleted ? " completed" : ""}`;
+    weeks.forEach((indices, week) => {
+        const doneCount = indices.filter(i => completedIndices.has(i)).length;
+        const block = document.createElement("details");
+        block.className = "session-week";
+        block.open = week === openWeek;
+        block.innerHTML = `<summary class="session-week-header">
+            <span>Week ${week}</span>
+            <span class="week-progress">${doneCount === indices.length ? "✓ done" : enrolled ? `${doneCount}/${indices.length}` : `${indices.length} sessions`}</span>
+        </summary>`;
 
-        let segmentsHtml = "";
-        if (sess.segments && sess.segments.length > 0) {
-            segmentsHtml = '<div class="sc-segments">' +
-                sess.segments.map(s => {
-                    const durStr = s.duration >= 1
-                        ? `${Math.round(s.duration)} min`
-                        : `${Math.round(s.duration * 60)}s`;
-                    return `<span class="sc-segment seg-${s.type}">${s.type} ${durStr}</span>`;
-                }).join("") + "</div>";
-        }
+        indices.forEach(idx => {
+            const sess = level.sessions[idx];
+            const isCompleted = completedIndices.has(idx);
+            const card = document.createElement("div");
+            card.className = `session-card type-${sess.type}${isCompleted ? " completed" : ""}${idx === next ? " is-next" : ""}`;
 
-        let actionHtml = "";
-        if (isCompleted) {
-            actionHtml = '<span class="completed-badge">✓ Done</span>';
-        } else {
-            actionHtml = `<button class="guided-run-btn" data-idx="${idx}" data-course="${course.id}" data-level="${levelKey}">▶ Guided Run</button>`;
-            if (progress && progress.level === levelKey) {
-                actionHtml += ` <button class="mark-complete-btn" data-idx="${idx}">Mark Complete</button>`;
+            let segmentsHtml = "";
+            if (sess.segments && sess.segments.length > 0) {
+                // Fun Runs have dozens of segments: show the games, not every easy stretch
+                const shown = sess.type === "fun" ? sess.segments.filter(s => s.label !== "Easy cruise") : sess.segments;
+                segmentsHtml = '<div class="sc-segments">' +
+                    shown.map(s => {
+                        const durStr = s.duration >= 1
+                            ? `${Math.round(s.duration)} min`
+                            : `${Math.round(s.duration * 60)}s`;
+                        return `<span class="sc-segment seg-${s.type}">${s.label || s.type} ${durStr}</span>`;
+                    }).join("") + "</div>";
             }
-        }
 
-        card.innerHTML = `
-            <div class="sc-header">
-                <span class="sc-title">Day ${sess.day}: ${sess.title}</span>
-                <span class="sc-type">${sess.type}</span>
-            </div>
-            <p class="sc-desc">${sess.description}</p>
-            ${segmentsHtml}
-            ${actionHtml}`;
-        container.appendChild(card);
+            let actionHtml = "";
+            if (isCompleted) {
+                actionHtml = '<span class="completed-badge">✓ Done</span>';
+            } else {
+                actionHtml = `<button class="guided-run-btn" data-idx="${idx}" data-course="${course.id}" data-level="${levelKey}">▶ Guided Run</button>`;
+                if (enrolled) {
+                    actionHtml += ` <button class="mark-complete-btn" data-idx="${idx}">Mark Complete</button>`;
+                }
+            }
+
+            card.innerHTML = `
+                <div class="sc-header">
+                    <span class="sc-title">Day ${sess.day}: ${sess.title}</span>
+                    <span class="sc-type">${sessionMinutes(sess)} min · ${sess.type}</span>
+                </div>
+                <p class="sc-desc">${sess.description}</p>
+                ${segmentsHtml}
+                ${actionHtml}`;
+            block.appendChild(card);
+        });
+        container.appendChild(block);
     });
 
     container.querySelectorAll(".mark-complete-btn").forEach(btn => {
@@ -1211,13 +1434,7 @@ function renderSessionList(course, levelKey, progress) {
             markSessionComplete(parseInt(btn.dataset.idx));
         });
     });
-
-    container.querySelectorAll(".guided-run-btn").forEach(btn => {
-        btn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            startGuidedRun(btn.dataset.course, btn.dataset.level, parseInt(btn.dataset.idx));
-        });
-    });
+    bindGuidedButtons(container);
 }
 
 function markSessionComplete(sessionIndex) {
@@ -1300,6 +1517,10 @@ function refreshActiveBanner() {
         document.getElementById("acb-level").textContent = prog.level;
         document.getElementById("acb-progress").style.width = pct + "%";
         document.getElementById("acb-detail").textContent = `${done}/${total} sessions · Week ${Math.ceil((done + 1) / level.sessionsPerWeek)} of ${level.duration}`;
+        const next = nextSessionIndex(level, prog);
+        const nextEl = document.getElementById("acb-next");
+        nextEl.innerHTML = next >= 0 ? upNextHtml(course, prog.level, next) : "";
+        bindGuidedButtons(nextEl);
         banner.style.display = "block";
     });
 }
@@ -1331,8 +1552,65 @@ document.getElementById("acb-abandon").addEventListener("click", () => {
 
 const SEGMENT_NAMES = {
     warmup: "Warm up", cooldown: "Cool down", run: "Run",
-    sprint: "Sprint", jog: "Jog", walk: "Walk", rest: "Rest"
+    sprint: "Sprint", jog: "Jog", walk: "Walk", rest: "Rest",
+    play: "Play", stride: "Stride"
 };
+
+function segmentLabel(seg) {
+    return seg.label || SEGMENT_NAMES[seg.type] || seg.type;
+}
+
+// ─── Tune-In coach (web runs; see coach.js) ────────────────────────────────────
+
+function newCoach(segments) {
+    return new TuneInCoach(segments.map(s => ({
+        target: s.target, surges: !!s.surges, durationMs: Math.round(s.duration * 60) * 1000,
+    })));
+}
+
+function runElapsedMs() {
+    return (isPaused ? pausedTime : Date.now()) - startTime;
+}
+
+function coachSay(phrases) {
+    phrases.forEach(p => speakText(p));
+    if (guidedRun && guidedRun.coach) guidedRun.coachState = guidedRun.coach.state(runElapsedMs());
+    renderCoach();
+}
+
+// You tapped a rating (1-5) on the run screen
+function rateEffort(rating) {
+    if (!guidedRun) return;
+    if (nativeRun) {
+        NativeTracker.rate(rating).catch(err => console.error("Rating failed:", err));
+    } else if (guidedRun.coach) {
+        runRatings = guidedRun.coach.ratings;
+        coachSay(guidedRun.coach.rate(rating, runElapsedMs()));
+    }
+    showToast(`Got it: ${rating} · ${EFFORT_LABELS[rating]}`, 1500);
+    const box = document.getElementById("gr-coach");
+    box.classList.add("rated");
+    setTimeout(() => box.classList.remove("rated"), 600);
+}
+
+// The coach box in the guided panel: what to aim for, and the 1-5 buttons
+function renderCoach() {
+    const box = document.getElementById("gr-coach");
+    if (!guidedRun) { box.style.display = "none"; return; }
+    if (guidedRun.coach) guidedRun.coachState = guidedRun.coach.state(runElapsedMs());
+    const st = guidedRun.coachState;
+    if (!st || !st.active) { box.style.display = "none"; return; }
+    box.style.display = "block";
+    box.classList.toggle("asking", !!st.asking);
+    box.classList.toggle("surge", st.mode === "surge");
+    box.classList.toggle("recover", st.mode === "recover");
+    document.getElementById("gr-coach-aim").textContent = st.instruction;
+    document.getElementById("gr-coach-ask").textContent = st.asking ? "How hard does it feel?" : "Tap any time to tell me how it feels";
+    box.querySelectorAll(".rate-btn").forEach(b => b.classList.toggle("last", Number(b.dataset.r) === st.lastRating));
+}
+
+document.querySelectorAll("#gr-coach .rate-btn").forEach(btn =>
+    btn.addEventListener("click", () => rateEffort(Number(btn.dataset.r))));
 
 function startGuidedRun(courseId, levelKey, sessionIndex) {
     if (document.getElementById("start").disabled) {
@@ -1347,6 +1625,9 @@ function startGuidedRun(courseId, levelKey, sessionIndex) {
     guidedRun = {
         courseId, level: levelKey, sessionIndex, session: sess,
         segments: sess.segments,
+        // Tune-In sessions: the Android service runs its own coach and reports its state
+        coach: TuneInCoach.isCoached(sess.segments) && !NativeTracker.available ? newCoach(sess.segments) : null,
+        coachState: null,
         currentSegmentIndex: -1,
         segmentStartTime: null,
         segmentInterval: null,
@@ -1366,13 +1647,6 @@ function startGuidedRun(courseId, levelKey, sessionIndex) {
             });
         }
     }).then(() => {
-        // Switch to track tab
-        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-        document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
-        document.querySelector('[data-tab="track"]').classList.add("active");
-        document.getElementById("tab-track").classList.add("active");
-        setTimeout(() => map.invalidateSize(), 100);
-
         showGuidedPanel(sess);
 
         // Start the actual run (GPS + timer)
@@ -1395,7 +1669,9 @@ function showGuidedPanel(sess) {
     document.getElementById("gr-segment-type").textContent = "GET READY";
     document.getElementById("gr-segment-intensity").textContent = "";
     document.getElementById("gr-time-remaining").textContent = "";
-    document.getElementById("gr-next-segment").textContent = `First: ${SEGMENT_NAMES[sess.segments[0].type] || sess.segments[0].type}`;
+    document.getElementById("gr-next-segment").textContent = `First: ${segmentLabel(sess.segments[0])}`;
+    guidedRun.coachState = null;
+    renderCoach();
     document.getElementById("gr-segment-count").textContent = `${sess.segments.length} segments total`;
     document.getElementById("gr-segment-progress").style.width = "0%";
 }
@@ -1417,6 +1693,7 @@ function startSegment(index, scheduledStart = Date.now()) {
 
     // When catching up after throttled timers, skip segments that already ended
     if (Date.now() < scheduledStart + durationSec * 1000) announceSegment(seg, durationSec);
+    if (guidedRun.coach) coachSay(guidedRun.coach.startSegment(index, runElapsedMs()));
     updateGuidedRunUI();
     // updateGuidedRunUI may already have advanced past this segment
     if (!guidedRun || guidedRun.currentSegmentIndex !== index || guidedRun.completing) return;
@@ -1426,6 +1703,7 @@ function startSegment(index, scheduledStart = Date.now()) {
 }
 
 function announceSegment(seg, durationSec) {
+    if (seg.say) { speakText(seg.say); return; }
     const name = SEGMENT_NAMES[seg.type] || seg.type;
     let durStr;
     if (durationSec >= 60) {
@@ -1446,6 +1724,7 @@ function updateGuidedRunUI() {
     const elapsed = ((Date.now() - guidedRun.segmentStartTime) / 1000) - guidedRun.segmentPausedElapsed;
     const remaining = Math.max(0, durationSec - elapsed);
 
+    if (guidedRun.coach) coachSay(guidedRun.coach.tick(runElapsedMs()));
     renderGuidedPanel(remaining);
 
     // Voice countdowns
@@ -1482,8 +1761,12 @@ function renderGuidedPanel(remaining) {
     const panel = document.getElementById("guided-run-panel");
     panel.className = `seg-${seg.type}`;
 
-    document.getElementById("gr-segment-type").textContent = (SEGMENT_NAMES[seg.type] || seg.type).toUpperCase();
-    document.getElementById("gr-segment-intensity").textContent = seg.intensity;
+    document.getElementById("gr-segment-type").textContent = segmentLabel(seg).toUpperCase();
+    // Games and strides show what to do; coached segments show it in the coach box
+    const intensity = document.getElementById("gr-segment-intensity");
+    intensity.textContent = (seg.type === "play" || seg.type === "stride") && seg.say ? seg.say : seg.intensity;
+    intensity.style.display = seg.target != null ? "none" : "";
+    renderCoach();
 
     const remMins = Math.floor(remaining / 60);
     const remSecs = Math.floor(remaining % 60);
@@ -1501,7 +1784,7 @@ function renderGuidedPanel(remaining) {
         const nextDur = Math.round(next.duration * 60);
         const nextDurStr = nextDur >= 60 ? `${Math.floor(nextDur / 60)}m` : `${nextDur}s`;
         document.getElementById("gr-next-segment").textContent =
-            `Next: ${SEGMENT_NAMES[next.type] || next.type} — ${nextDurStr}`;
+            `Next: ${segmentLabel(next)} — ${nextDurStr}`;
     } else {
         document.getElementById("gr-next-segment").textContent = "Final segment!";
     }
@@ -1533,7 +1816,7 @@ function completeGuidedRun() {
         guidedRun = null;
 
         // Stop the run
-        document.getElementById("stop").click();
+        stopRun();
     });
 }
 

@@ -39,7 +39,20 @@ data class TrackPoint(
     val bearing: Double? = null,
 )
 
-data class GuidedSegment(val type: String, val durationSec: Int, val intensity: String)
+/**
+ * One step of a guided session. `label`/`say` override the generic name and
+ * announcement (Fun Run games); `target` (1-5) makes the Tune-In coach run
+ * during it, with `surges` adding adaptive pick-ups.
+ */
+data class GuidedSegment(
+    val type: String,
+    val durationSec: Int,
+    val intensity: String,
+    val label: String? = null,
+    val say: String? = null,
+    val target: Int? = null,
+    val surges: Boolean = false,
+)
 
 /** The ghost to race: finish line in metres and its run (moving time vs distance). */
 data class GhostConfig(val targetMeters: Double, val timeSeries: List<TimePoint>)
@@ -53,20 +66,120 @@ data class RunConfig(
     val meta: String? = null,
 )
 
-class KalmanFilter(private val processNoise: Double, initialEstimate: Double) {
-    private var estimateError = 1.0
-    private var estimate = initialEstimate
+/**
+ * Constant-velocity Kalman filter in local metres, one [position, velocity]
+ * filter per axis (east, north). Each fix updates it with the position,
+ * weighted by its reported accuracy, and with the receiver's Doppler speed and
+ * bearing when present. Summing distances between raw fixes overstates
+ * distance because jitter adds length; this cuts that error from ~2-8% to ~1%
+ * on synthetic runs. Same filter and constants as gps-filter.js.
+ */
+class GpsFilter {
 
-    fun update(measurement: Double, accuracyMeters: Double): Double {
-        // Weight measurement by GPS-reported accuracy (metres -> degrees, squared for variance)
-        val accuracyDeg = accuracyMeters / 111320
-        val measurementNoise = accuracyDeg * accuracyDeg
-        estimateError += processNoise
-        val gain = estimateError / (estimateError + measurementNoise)
-        estimate += gain * (measurement - estimate)
-        estimateError *= (1 - gain)
-        return estimate
+    data class Estimate(val lat: Double, val lng: Double, val speed: Double)
+
+    companion object {
+        /** How hard a runner can change velocity (m/s²). */
+        const val ACCEL_SIGMA = 1.0
+        /** Doppler velocity noise per axis (m/s). */
+        const val VELOCITY_SIGMA = 0.5
+        /** Below this the bearing is meaningless, but the speed still says "standing still". */
+        const val STILL_MPS = 0.5
+        /** Squared Mahalanobis distance (2 dof, p < 0.001) beyond which a fix is a glitch... */
+        const val GATE = 16.0
+        /** ...unless this many come in a row, which means the filter is the one that's wrong. */
+        const val MAX_REJECTS = 3
+        private const val M_PER_DEG = 6371000.0 * Math.PI / 180
+
+        /** Doppler speed/bearing as (east, north) m/s, or null if unusable. */
+        fun velocity(speed: Double?, bearing: Double?): DoubleArray? {
+            if (speed == null || !speed.isFinite()) return null
+            if (bearing == null || !bearing.isFinite()) return if (speed < STILL_MPS) doubleArrayOf(0.0, 0.0) else null
+            val b = Math.toRadians(bearing)
+            return doubleArrayOf(speed * sin(b), speed * cos(b))
+        }
     }
+
+    private var originLat = 0.0
+    private var originLng = 0.0
+    private var cosLat = 1.0
+    private var started = false
+    private var time = 0L
+    private var rejects = 0
+    // Per axis: position, velocity, and covariance [p00, p01, p10, p11]
+    private val pos = DoubleArray(2)
+    private val vel = DoubleArray(2)
+    private val cov = Array(2) { DoubleArray(4) }
+
+    /** The filtered fix, or null if it was rejected as a glitch. */
+    fun update(lat: Double, lng: Double, accuracy: Double, timeMs: Long, speed: Double? = null, bearing: Double? = null): Estimate? {
+        if (!started) return reset(lat, lng, accuracy, timeMs, speed, bearing)
+        val z = doubleArrayOf((lng - originLng) * M_PER_DEG * cosLat, (lat - originLat) * M_PER_DEG)
+        val vz = velocity(speed, bearing)
+        val dt = max(0L, timeMs - time) / 1000.0
+        val q = ACCEL_SIGMA * ACCEL_SIGMA
+        val rp = accuracy * accuracy
+        val rv = VELOCITY_SIGMA * VELOCITY_SIGMA
+
+        // Predict: x += v·dt, plus white-acceleration process noise
+        val x = Array(2) { doubleArrayOf(pos[it] + vel[it] * dt, vel[it]) }
+        val p = Array(2) {
+            val (a, b, c, d) = cov[it]
+            doubleArrayOf(
+                a + dt * (b + c) + dt * dt * d + q * dt * dt * dt / 3,
+                b + dt * d + q * dt * dt / 2,
+                c + dt * d + q * dt * dt / 2,
+                d + q * dt,
+            )
+        }
+
+        var nis = 0.0
+        for (i in 0..1) nis += (z[i] - x[i][0]).let { it * it } / (p[i][0] + rp)
+        if (nis > GATE && ++rejects < MAX_REJECTS) return null
+        if (nis > GATE) return reset(lat, lng, accuracy, timeMs, speed, bearing)
+        rejects = 0
+
+        for (i in 0..1) {
+            // Position measurement
+            var (a, b, c, d) = p[i]
+            var s = a + rp
+            var k0 = a / s
+            var k1 = c / s
+            var y = z[i] - x[i][0]
+            x[i][0] += k0 * y; x[i][1] += k1 * y
+            p[i] = doubleArrayOf((1 - k0) * a, (1 - k0) * b, c - k1 * a, d - k1 * b)
+            // Velocity measurement
+            if (vz != null) {
+                a = p[i][0]; b = p[i][1]; c = p[i][2]; d = p[i][3]
+                s = d + rv; k0 = b / s; k1 = d / s; y = vz[i] - x[i][1]
+                x[i][0] += k0 * y; x[i][1] += k1 * y
+                p[i] = doubleArrayOf(a - k0 * c, b - k0 * d, (1 - k1) * c, (1 - k1) * d)
+            }
+        }
+        for (i in 0..1) { pos[i] = x[i][0]; vel[i] = x[i][1]; p[i].copyInto(cov[i]) }
+        time = timeMs
+        return estimate()
+    }
+
+    /** Starts over at this fix (first fix, after a pause or a GPS gap). */
+    fun reset(lat: Double, lng: Double, accuracy: Double, timeMs: Long, speed: Double? = null, bearing: Double? = null): Estimate {
+        originLat = lat; originLng = lng; cosLat = cos(Math.toRadians(lat))
+        val v = velocity(speed, bearing) ?: doubleArrayOf(0.0, 0.0)
+        val pv = accuracy * accuracy
+        // Unknown velocity starts with a wide (5 m/s) uncertainty
+        val vv = if (speed == null) 25.0 else VELOCITY_SIGMA * VELOCITY_SIGMA
+        for (i in 0..1) { pos[i] = 0.0; vel[i] = v[i]; doubleArrayOf(pv, 0.0, 0.0, vv).copyInto(cov[i]) }
+        time = timeMs
+        rejects = 0
+        started = true
+        return estimate()
+    }
+
+    private fun estimate() = Estimate(
+        originLat + pos[1] / M_PER_DEG,
+        originLng + pos[0] / (M_PER_DEG * cosLat),
+        sqrt(vel[0] * vel[0] + vel[1] * vel[1]),
+    )
 }
 
 class RunEngine(val config: RunConfig, now: Long) {
@@ -99,9 +212,12 @@ class RunEngine(val config: RunConfig, now: Long) {
         val SEGMENT_NAMES = mapOf(
             "warmup" to "Warm up", "cooldown" to "Cool down", "run" to "Run",
             "sprint" to "Sprint", "jog" to "Jog", "walk" to "Walk", "rest" to "Rest",
+            "play" to "Play", "stride" to "Stride",
         )
 
         fun segmentName(type: String) = SEGMENT_NAMES[type] ?: type
+
+        fun segmentName(seg: GuidedSegment) = seg.label ?: segmentName(seg.type)
 
         fun distance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
             val r = 6371000.0
@@ -179,11 +295,16 @@ class RunEngine(val config: RunConfig, now: Long) {
     var lastMotionAt: Long? = null
         private set
 
+    // Smoothed speed (m/s) from the GPS filter and when it was last updated, for the live pace readout
+    var currentSpeed: Double? = null
+        private set
+    var currentSpeedAt: Long? = null
+        private set
+
     private var prevPosition: LatLng? = null
     private var lastFixTime = 0L
     private var lastRawFixTime: Long? = null
-    private var kalmanLat: KalmanFilter? = null
-    private var kalmanLon: KalmanFilter? = null
+    private var filter: GpsFilter? = null
     private var nextMilestone = 1000.0
     private var lastMilestoneTime = now
     private var lastTimeSeriesDistance = 0.0
@@ -199,6 +320,9 @@ class RunEngine(val config: RunConfig, now: Long) {
     private val guidedSegmentEnds: List<Long> = config.guided.orEmpty().runningFold(GUIDED_COUNTDOWN_MS) { acc, s ->
         acc + s.durationSec * 1000L
     }
+
+    /** Tune-In sessions: asks how hard it feels and adapts (null for other runs). */
+    val coach: TuneInCoach? = if (TuneInCoach.isCoached(config.guided)) TuneInCoach(config.guided!!) else null
 
     // Ghost race result: null while racing, true/false once you cross the target.
     var ghostWon: Boolean? = null
@@ -231,8 +355,7 @@ class RunEngine(val config: RunConfig, now: Long) {
         startTime += now - pausedAt
         lastMilestoneTime += now - pausedAt
         prevPosition = null
-        kalmanLat = null
-        kalmanLon = null
+        filter = null
         lastRawFixTime = null
         status = Status.RUNNING
     }
@@ -261,9 +384,15 @@ class RunEngine(val config: RunConfig, now: Long) {
         lastBearing = bearing
         lastMotionAt = now
 
-        if (kalmanLat == null) resetKalman(rawLat, rawLon)
-        val lat = kalmanLat!!.update(rawLat, accuracy)
-        val lon = kalmanLon!!.update(rawLon, accuracy)
+        // After a GPS gap the old velocity says nothing about where you are now
+        val f = filter?.takeUnless { rawGapStart != null && now - rawGapStart > GAP_THRESHOLD_MS }
+            ?: GpsFilter().also { filter = it }
+        val filtered = f.update(rawLat, rawLon, accuracy, now, speed, bearing)
+            ?: return emptyList() // a glitch, far from where the filter expects you
+        val lat = filtered.lat
+        val lon = filtered.lng
+        currentSpeed = filtered.speed
+        currentSpeedAt = now
         val point = LatLng(lat, lon)
         val current = pathSegments.last()
 
@@ -289,7 +418,6 @@ class RunEngine(val config: RunConfig, now: Long) {
                 pathSegments.add(mutableListOf(point))
                 prevPosition = point
                 lastFixTime = now
-                resetKalman(lat, lon)
                 addTrackPoint(now, point, speed, bearing)
             }
             return emptyList()
@@ -301,7 +429,6 @@ class RunEngine(val config: RunConfig, now: Long) {
             gapCoords.add(current.last() to point)
             pathSegments.add(mutableListOf(point))
             estimatedDistance += dist
-            resetKalman(lat, lon)
         } else {
             current.add(point)
         }
@@ -339,6 +466,23 @@ class RunEngine(val config: RunConfig, now: Long) {
         return speech
     }
 
+    /** You rated your effort 1-5 on the run screen. Returns phrases to speak. */
+    fun rate(rating: Int, now: Long): List<String> {
+        val c = coach ?: return emptyList()
+        if (status == Status.FINISHED || guidedCompleted) return emptyList()
+        return c.rate(rating, elapsedMs(now))
+    }
+
+    /** Too easy (-1), just right (0) or too hard (+1), from the notification. */
+    fun rateRelative(delta: Int, now: Long): List<String> {
+        val c = coach ?: return emptyList()
+        if (status == Status.FINISHED || guidedCompleted) return emptyList()
+        return c.rateRelative(delta, elapsedMs(now))
+    }
+
+    /** Whether the coach is running right now (shows rating buttons). */
+    val coachActive get() = coach?.active == true && status != Status.FINISHED && !guidedCompleted
+
     /** Guided-run display state: segment index (-1 = get ready) and ms left in it. */
     fun guidedRemainingMs(now: Long): Long {
         val segments = config.guided ?: return 0
@@ -370,9 +514,13 @@ class RunEngine(val config: RunConfig, now: Long) {
         if (index != guidedIndex) {
             guidedIndex = index
             announcedWarnings.clear()
-            if (index >= 0) speech += segmentAnnouncement(segments[index])
+            if (index >= 0) {
+                speech += segmentAnnouncement(segments[index])
+                coach?.let { speech += it.startSegment(index, elapsed) }
+            }
         }
         if (index < 0) return speech
+        coach?.let { speech += it.tick(elapsed) }
 
         val seg = segments[index]
         val remaining = (guidedSegmentEnds[index + 1] - elapsed) / 1000.0
@@ -386,6 +534,7 @@ class RunEngine(val config: RunConfig, now: Long) {
     }
 
     private fun segmentAnnouncement(seg: GuidedSegment): String {
+        seg.say?.let { return it }
         val d = seg.durationSec
         val durStr = if (d >= 60) {
             val mins = d / 60
@@ -488,10 +637,5 @@ class RunEngine(val config: RunConfig, now: Long) {
 
     private fun addTrackPoint(now: Long, point: LatLng, speed: Double?, bearing: Double?) {
         track.add(TrackPoint(now - startTime, totalDistance, point.lat, point.lng, speed, bearing))
-    }
-
-    private fun resetKalman(lat: Double, lon: Double) {
-        kalmanLat = KalmanFilter(0.0001, lat)
-        kalmanLon = KalmanFilter(0.0001, lon)
     }
 }

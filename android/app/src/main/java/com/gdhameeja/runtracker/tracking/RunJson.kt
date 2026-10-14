@@ -17,11 +17,22 @@ object RunJson {
         guided = json.optJSONArray("guided")?.let { arr ->
             (0 until arr.length()).map {
                 val s = arr.getJSONObject(it)
-                GuidedSegment(s.getString("type"), s.getInt("durationSec"), s.optString("intensity"))
+                GuidedSegment(
+                    type = s.getString("type"),
+                    durationSec = s.getInt("durationSec"),
+                    intensity = s.optString("intensity"),
+                    label = s.optNullableString("label"),
+                    say = s.optNullableString("say"),
+                    target = if (s.has("target") && !s.isNull("target")) s.getInt("target") else null,
+                    surges = s.optBoolean("surges", false),
+                )
             }
         },
         meta = json.optString("meta").ifEmpty { null },
     )
+
+    private fun JSONObject.optNullableString(key: String): String? =
+        if (has(key) && !isNull(key)) getString(key).ifEmpty { null } else null
 
     private fun parseTimeSeries(arr: JSONArray): List<TimePoint> = (0 until arr.length()).map {
         val p = arr.getJSONObject(it)
@@ -52,6 +63,8 @@ object RunJson {
         put("speed", e.lastSpeed ?: JSONObject.NULL)
         put("bearing", e.lastBearing ?: JSONObject.NULL)
         put("motionAgeMs", e.lastMotionAt?.let { now - it } ?: JSONObject.NULL)
+        put("currentSpeed", e.currentSpeed ?: JSONObject.NULL)
+        put("currentSpeedAgeMs", e.currentSpeedAt?.let { now - it } ?: JSONObject.NULL)
         if (e.config.guided != null) {
             put("guided", JSONObject().apply {
                 put("index", e.guidedIndex)
@@ -60,6 +73,17 @@ object RunJson {
             })
         }
         if (e.config.ghost != null) put("ghostWon", e.ghostWon ?: JSONObject.NULL)
+        e.coach?.let { c ->
+            val instruction = if (e.coachActive) c.instruction(e.elapsedMs(now)) else null
+            put("coach", JSONObject().apply {
+                put("active", instruction != null)
+                put("target", c.target() ?: JSONObject.NULL)
+                put("mode", c.mode.name.lowercase())
+                put("asking", c.isAsking)
+                put("lastRating", c.lastRating ?: JSONObject.NULL)
+                put("instruction", instruction ?: JSONObject.NULL)
+            })
+        }
         put("meta", e.config.meta ?: JSONObject.NULL)
     }
 
@@ -78,6 +102,7 @@ object RunJson {
             }
         })
         put("track", JSONArray().apply { e.track.forEach { put(trackPoint(it)) } })
+        e.coach?.let { c -> put("ratings", JSONArray().apply { c.ratings.forEach { (t, r) -> put(JSONArray().put(t).put(r)) } }) }
     }
 
     /** `[timeMs, distanceM, lat, lng, speed|null, bearing|null]`, rounded to keep runs small (same as script.js). */

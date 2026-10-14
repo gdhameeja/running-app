@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Running Tracker</title>
+    <title>Run Tracker</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap">
@@ -13,75 +13,33 @@
 </head>
 <body>
     <div class="container">
-        <h2>Live Running Tracker</h2>
-
         <!-- Tab Navigation -->
         <div class="tab-bar">
-            <button class="tab active" data-tab="track">Track</button>
+            <button class="tab active" data-tab="track">Run</button>
+            <button class="tab" data-tab="history">History</button>
             <button class="tab" data-tab="courses">Courses</button>
-            <button class="tab" data-tab="ghost">Ghost Race</button>
+            <button class="tab" data-tab="ghost">Race</button>
             <button class="tab" data-tab="stats">Stats</button>
         </div>
 
-        <!-- ═══ TRACK TAB ═══ -->
+        <!-- Shown on every tab while a run is minimised -->
+        <button id="run-bar" style="display:none;">
+            <span class="material-icons">directions_run</span>
+            <span id="run-bar-text">Run in progress</span>
+            <span class="run-bar-open">Open <span class="material-icons">expand_less</span></span>
+        </button>
+
+        <!-- ═══ RUN TAB (before a run) ═══ -->
         <div class="tab-content active" id="tab-track">
-            <!-- Guided Run Coach Panel -->
-            <div id="guided-run-panel" style="display:none;">
-                <div class="gr-session-title" id="gr-session-name"></div>
-                <div class="gr-type" id="gr-segment-type">GET READY</div>
-                <div class="gr-intensity" id="gr-segment-intensity"></div>
-                <div class="gr-countdown" id="gr-time-remaining">--:--</div>
-                <div class="gr-progress-bar"><div class="gr-progress-fill" id="gr-segment-progress"></div></div>
-                <div class="gr-next" id="gr-next-segment"></div>
-                <div class="gr-count" id="gr-segment-count"></div>
-            </div>
-            <!-- Ghost Race Comparison Panel -->
-            <div id="ghost-panel" style="display:none;">
-                <div class="ghost-panel-header">
-                    <span class="ghost-emoji">👻</span>
-                    <span id="ghost-panel-title">Ghost Race</span>
-                </div>
-                <div class="ghost-comparison">
-                    <div class="ghost-col">
-                        <div class="ghost-label">YOU</div>
-                        <div class="ghost-stat" id="ghost-your-dist">0.00 km</div>
-                        <div class="ghost-stat-small" id="ghost-your-pace">--:-- /km</div>
-                    </div>
-                    <div class="ghost-vs">VS</div>
-                    <div class="ghost-col">
-                        <div class="ghost-label">GHOST</div>
-                        <div class="ghost-stat" id="ghost-ghost-dist">0.00 km</div>
-                        <div class="ghost-stat-small" id="ghost-ghost-pace">--:-- /km</div>
-                    </div>
-                </div>
-                <div class="ghost-diff-bar" id="ghost-diff">Starting...</div>
-                <button id="ar-open" class="ghost-ar-btn"><span class="material-icons">view_in_ar</span> See your ghost (AR)</button>
-            </div>
-            <div id="map"></div>
-            <p>Distance: <span id="distance">0.00 kms</span></p>
-            <p>Time Elapsed: <span id="time">0:00</span></p>
-            <p>Average Pace: <span id="pace">0:00 /km</span></p>
-            <button id="start"><span class="material-icons">play_arrow</span></button>
-            <button id="pause" disabled><span class="material-icons">pause</span></button>
-            <button id="stop" disabled><span class="material-icons">stop</span></button>
-            <button id="lock-screen" disabled title="Lock screen (keeps GPS running)"><span class="material-icons">lock</span></button>
-            <p id="gps-status"></p>
-            <button id="showPreviousRuns">Show Previous Runs</button>
-            <div id="previousRunsSection" style="display:none; margin-top:20px;">
-                <label for="pageSizeSelect">Runs per page:</label>
-                <select id="pageSizeSelect">
-                    <option value="5">5</option>
-                    <option value="10" selected>10</option>
-                    <option value="20">20</option>
-                    <option value="50">50</option>
-                    <option value="100">100</option>
-                </select>
-                <div style="margin:10px 0;">
-                    <button id="prevPage">Previous</button>
-                    <button id="nextPage">Next</button>
-                </div>
-                <div id="previous-runs-container"></div>
-            </div>
+            <div id="home-map-slot" class="map-slot"><div id="map"></div></div>
+            <p id="home-gps" class="home-gps">Finding GPS…</p>
+            <button id="start" class="start-btn"><span class="material-icons">play_arrow</span> Start run</button>
+            <div id="home-recent"></div>
+        </div>
+
+        <!-- ═══ HISTORY TAB ═══ -->
+        <div class="tab-content" id="tab-history">
+            <div id="history-list"></div>
         </div>
 
         <!-- ═══ COURSES TAB ═══ -->
@@ -95,6 +53,7 @@
                 </div>
                 <div class="progress-bar"><div class="progress-fill" id="acb-progress"></div></div>
                 <p id="acb-detail"></p>
+                <div id="acb-next"></div>
                 <button id="acb-view" class="btn-small">View Sessions</button>
                 <button id="acb-abandon" class="btn-small btn-danger">Abandon</button>
             </div>
@@ -118,6 +77,7 @@
                 <p id="cd-level-desc" class="level-desc"></p>
                 <p id="cd-level-info" class="level-info"></p>
                 <button id="start-course" class="btn-primary">Start Course</button>
+                <div id="up-next"></div>
                 <div id="session-list"></div>
             </div>
         </div>
@@ -161,10 +121,85 @@
         </div>
     </div>
 
+    <!-- ═══ RUN SCREEN (full screen while a run is in progress, then its summary) ═══ -->
+    <div id="run-screen" data-state="running" style="display:none;">
+        <div class="rs-top">
+            <button id="rs-minimise" class="rs-icon" aria-label="Back to the app (the run keeps going)"><span class="material-icons">expand_more</span></button>
+            <span id="gps-status"></span>
+            <button id="lock-screen" class="rs-icon" disabled aria-label="Lock screen (keeps GPS running)"><span class="material-icons">lock</span></button>
+        </div>
+        <div class="rs-body">
+            <!-- Guided Run Coach Panel -->
+            <div id="guided-run-panel" style="display:none;">
+                <div class="gr-session-title" id="gr-session-name"></div>
+                <div class="gr-type" id="gr-segment-type">GET READY</div>
+                <div class="gr-intensity" id="gr-segment-intensity"></div>
+                <div class="gr-countdown" id="gr-time-remaining">--:--</div>
+                <div class="gr-progress-bar"><div class="gr-progress-fill" id="gr-segment-progress"></div></div>
+                <!-- Tune-In coach: what to aim for and how it feels -->
+                <div id="gr-coach" style="display:none;">
+                    <div class="coach-aim" id="gr-coach-aim"></div>
+                    <div class="coach-ask" id="gr-coach-ask"></div>
+                    <div class="rate-row">
+                        <button class="rate-btn" data-r="1"><b>1</b><small>Too easy</small></button>
+                        <button class="rate-btn" data-r="2"><b>2</b><small>Easy</small></button>
+                        <button class="rate-btn" data-r="3"><b>3</b><small>Working</small></button>
+                        <button class="rate-btn" data-r="4"><b>4</b><small>Hard</small></button>
+                        <button class="rate-btn" data-r="5"><b>5</b><small>Maxed</small></button>
+                    </div>
+                </div>
+                <div class="gr-next" id="gr-next-segment"></div>
+                <div class="gr-count" id="gr-segment-count"></div>
+            </div>
+            <!-- Ghost Race Comparison Panel -->
+            <div id="ghost-panel" style="display:none;">
+                <div class="ghost-panel-header">
+                    <span class="ghost-emoji">👻</span>
+                    <span id="ghost-panel-title">Ghost Race</span>
+                </div>
+                <div class="ghost-comparison">
+                    <div class="ghost-col">
+                        <div class="ghost-label">YOU</div>
+                        <div class="ghost-stat" id="ghost-your-dist">0.00 km</div>
+                        <div class="ghost-stat-small" id="ghost-your-pace">--:-- /km</div>
+                    </div>
+                    <div class="ghost-vs">VS</div>
+                    <div class="ghost-col">
+                        <div class="ghost-label">GHOST</div>
+                        <div class="ghost-stat" id="ghost-ghost-dist">0.00 km</div>
+                        <div class="ghost-stat-small" id="ghost-ghost-pace">--:-- /km</div>
+                    </div>
+                </div>
+                <div class="ghost-diff-bar" id="ghost-diff">Starting...</div>
+                <button id="ar-open" class="ghost-ar-btn"><span class="material-icons">view_in_ar</span> See your ghost (AR)</button>
+            </div>
+            <div class="rs-hero">
+                <div class="rs-distance" id="distance">0.00</div>
+                <div class="rs-label">kilometres</div>
+            </div>
+            <div class="rs-tiles">
+                <div><span id="time">0:00</span><small>time</small></div>
+                <div><span id="current-pace">--:--</span><small>pace now /km</small></div>
+                <div><span id="pace">--:--</span><small>average /km</small></div>
+            </div>
+            <div id="rs-summary"></div>
+            <div id="rs-map-slot" class="map-slot"></div>
+        </div>
+        <div class="rs-controls">
+            <button id="pause" disabled><span class="material-icons">pause</span><span class="btn-label">Pause</span></button>
+            <button id="stop" disabled><span class="hold-fill"></span><span class="material-icons">stop</span><span class="btn-label">Hold to finish</span></button>
+        </div>
+        <div class="rs-done">
+            <button id="rs-details" class="rs-secondary">View details</button>
+            <button id="rs-done-btn">Done</button>
+        </div>
+    </div>
+
     <!-- In-app lock: black screen that ignores touches, so the page stays visible and GPS keeps working -->
     <div id="lock-overlay" style="display:none;">
         <div class="lock-distance"><span id="lock-distance">0.00</span> km</div>
-        <div class="lock-row"><span id="lock-time">0:00</span> · <span id="lock-pace">0:00 /km</span></div>
+        <div class="lock-row"><span id="lock-time">0:00</span> · avg <span id="lock-pace">--:--</span> /km</div>
+        <div class="lock-row">now <span id="lock-current-pace">--:--</span> /km</div>
         <div class="lock-row" id="lock-guided"></div>
         <div class="lock-row" id="lock-ghost"></div>
         <div class="lock-hint"><span class="material-icons">lock</span> <span id="lock-hint">Hold for 2 seconds to unlock</span></div>
@@ -215,8 +250,10 @@
     </div>
     <div id="toast" style="display:none;"></div>
 
+    <script src="coach.js"></script>
     <script src="courses.js"></script>
     <script src="analysis.js"></script>
+    <script src="gps-filter.js"></script>
     <script src="native-tracker.js"></script>
     <script src="script.js"></script>
     <script src="performance.js"></script>

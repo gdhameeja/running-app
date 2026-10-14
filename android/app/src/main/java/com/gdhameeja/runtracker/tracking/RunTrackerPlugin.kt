@@ -139,6 +139,15 @@ class RunTrackerPlugin : Plugin() {
         }
     }
 
+    /** Effort rating (1-5) for the Tune-In coach. */
+    @PluginMethod
+    fun rate(call: PluginCall) {
+        main.post {
+            RunTrackerService.instance?.rate(call.getInt("rating") ?: 3)
+            call.resolve()
+        }
+    }
+
     @PluginMethod
     fun speak(call: PluginCall) {
         main.post {

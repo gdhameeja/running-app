@@ -61,6 +61,7 @@ const RunDetail = (() => {
                     ${hasTrack ? `<div><span>${formatTime(Math.round(stoppedMs / 1000))}</span><small>stopped</small></div>` : ""}
                 </div>
                 <div id="rd-tags"></div>
+                ${run.distance >= 300 ? `<button class="rd-race"><span class="material-icons">directions_run</span> Race this run</button>` : ""}
                 <div id="rd-map"></div>
                 <div class="rd-legend" id="rd-legend"></div>
                 <div class="rd-replay" id="rd-replay" style="display:none;">
@@ -78,6 +79,8 @@ const RunDetail = (() => {
         el.style.display = "flex";
         document.body.classList.add("rd-open");
         el.querySelector(".rd-back").addEventListener("click", () => close(false));
+        const raceBtn = el.querySelector(".rd-race");
+        if (raceBtn) raceBtn.addEventListener("click", () => raceRun(run));
 
         renderTags(run, runs);
         renderMap(run, stops);
@@ -85,6 +88,17 @@ const RunDetail = (() => {
         if (hasTrack) renderStops(stops);
         if (run.guided) renderGuided(run, runs);
         setupReplay(run, series);
+    }
+
+    // Race this run's ghost. Closing pops history, so start once that's done
+    // or the run screen's history entry would be popped instead.
+    function raceRun(run) {
+        const spec = { type: "run", runId: run.runId, targetM: Math.floor(run.distance / 10) * 10, label: `Run of ${shortDate(run.startTime)}` };
+        const go = () => startGhostRaceMode(spec);
+        const popping = history.state && history.state.runDetail;
+        if (popping) window.addEventListener("popstate", () => setTimeout(go, 0), { once: true });
+        close(false);
+        if (!popping) go();
     }
 
     // ─── Header tags: ghost, guided session, route rank ─────────────────────
@@ -220,11 +234,39 @@ const RunDetail = (() => {
         moved: ["Kept moving", "slow"], stood: ["Stood still", "slow"], info: ["", "info"], skipped: ["Not reached", "info"],
     };
 
+    // Tune-In check-ins: when you rated your effort and what you said
+    function checkInsHtml(run) {
+        if (!run.ratings || !run.ratings.length) return "";
+        const avg = run.ratings.reduce((sum, x) => sum + x[1], 0) / run.ratings.length;
+        return `
+            <h3>Check-ins</h3>
+            <p class="rd-guided-summary">You checked in <b>${run.ratings.length}</b> time${run.ratings.length > 1 ? "s" : ""}, average effort <b>${avg.toFixed(1)}</b> of 5.</p>
+            <div class="rd-checkins">${run.ratings.map(([t, r]) =>
+                `<span class="rd-checkin e${r}" title="${EFFORT_LABELS[r]}"><b>${r}</b><small>${formatTime(Math.round(t / 1000))}</small></span>`).join("")}</div>`;
+    }
+
+    // Fun Run: no verdicts, just what you did and how quick the strides were
+    function funSummaryHtml(rep) {
+        const games = rep.rows.filter(r => r.seg.type === "play" || (r.seg.type === "run" && r.seg.label && r.seg.label !== "Easy cruise"));
+        const strides = rep.rows.filter(r => r.seg.type === "stride" && r.paceSec);
+        const done = games.filter(r => r.status !== "skipped").length;
+        return `
+            <h3>Fun report</h3>
+            <p class="rd-guided-summary">You played <b>${done}</b> game${done === 1 ? "" : "s"}${strides.length ? ` and ran <b>${strides.length}</b> stride${strides.length > 1 ? "s" : ""}` : ""}.</p>
+            ${strides.length ? `<div class="rd-checkins">${strides.map(r =>
+                `<span class="rd-checkin stride"><b>${formatPace(r.paceSec)}</b><small>${escapeHtml(r.seg.label)}</small></span>`).join("")}</div>
+            <p class="gr-note">Stride paces per km. Strides are short, so GPS pace is rough.</p>` : ""}`;
+    }
+
     function renderGuided(run, runs) {
         const box = document.getElementById("rd-guided");
         const p5 = RunAnalysis.fiveKPace(runs, run.startTime);
         const rep = RunAnalysis.guidedReport(run, run.guided, p5);
-        if (!rep) return;
+        if (!rep) { box.innerHTML = checkInsHtml(run); return; }
+        if (run.guided.segments.some(x => x.type === "play")) {
+            box.innerHTML = funSummaryHtml(rep);
+            return;
+        }
         const dur = (ms) => ms >= 60000 && ms % 60000 === 0 ? `${ms / 60000} min` : formatTime(Math.round(ms / 1000));
         const range = (r) => r.lo == null ? r.target.label
             : r.lo <= 0 ? `${r.target.label}: under ${formatPace(r.hi)}` : `${r.target.label}: ${formatPace(r.lo)}–${formatPace(r.hi)}`;
@@ -246,14 +288,15 @@ const RunDetail = (() => {
                         : r.paceSec ? `${formatPace(r.paceSec)} /km` : "—";
                     return `<tr>
                         <td>${r.index + 1}</td>
-                        <td><b>${SEGMENT_NAMES[r.seg.type] || r.seg.type}</b> ${dur(r.durationMs)}<br><small>${escapeHtml(range(r))}</small></td>
+                        <td><b>${escapeHtml(segmentLabel(r.seg))}</b> ${dur(r.durationMs)}<br><small>${escapeHtml(range(r))}</small></td>
                         <td>${you}${r.partial ? "<br><small>ended early</small>" : ""}${r.shortForGps && r.paceSec ? "<br><small>short: GPS pace is rough</small>" : ""}</td>
                         <td><span class="rd-verdict ${cls}">${text}</span></td></tr>`;
                 }).join("")}
             </table>
-            <p class="gr-note">${p5
+            ${run.ratings && run.ratings.length ? "" : `<p class="gr-note">${p5
                 ? `Targets come from your predicted 5K pace of ${formatPace(p5)} /km (your best recent run, scaled to 5K). Without heart rate, effort is judged by pace.`
-                : "Do a run of 1.5 km or more and pace targets will appear here."}</p>`;
+                : "Do a run of 1.5 km or more and pace targets will appear here."}</p>`}
+            ${checkInsHtml(run)}`;
     }
 
     // ─── Replay ──────────────────────────────────────────────────────────────
