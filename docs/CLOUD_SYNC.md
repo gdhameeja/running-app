@@ -49,6 +49,11 @@ To avoid it:
   turns scheduled workflows off in a public repo after 60 days without a push,
   and emails you first.
 
+## Storage limits
+
+The free plan's 500 MB lasts 10+ years at your pace. How to check, and how
+to free space without losing anything: [SUPABASE_STORAGE.md](SUPABASE_STORAGE.md).
+
 ## Backup file
 
 **History → Cloud backup → Export JSON** saves everything (runs and course

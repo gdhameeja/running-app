@@ -7,6 +7,12 @@ name: Release APK
 on:
   push:
     branches: [main]
+    # Docs changes don't change the app: no new release
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "supabase/**"
+      - ".github/workflows/supabase-keepalive.yml"
   workflow_dispatch:
 
 permissions:
