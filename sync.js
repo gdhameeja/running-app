@@ -376,10 +376,23 @@ const CloudSync = (() => {
                 <p class="sp-note">Everything in one JSON file, in case the cloud is ever unavailable. Import adds what's missing; it never deletes.</p>
                 <div class="sp-row"><button class="btn-small" id="sp-export">Export JSON</button><button class="btn-small" id="sp-import">Import JSON</button></div>
                 <input id="sp-file" type="file" accept="application/json,.json" style="display:none">
+                ${NativeTracker.available ? watchHtml() : ""}
                 ${NativeTracker.available ? `<h4>App</h4>${update || '<p class="sp-note" id="sp-version"></p>'}
                     <div class="sp-row"><button class="btn-small" id="sp-check-update">Check for updates</button></div>` : ""}
             </details>`;
         bindPanel(el);
+    }
+
+    // Health Connect: heart rate, sleep and resting HR from the watch app (enrich.js)
+    function watchHtml() {
+        const h = Enrich.healthState();
+        const note = h.granted ? "Connected. Heart rate during runs, sleep and resting heart rate come from your watch app through Health Connect."
+            : h.status === "unavailable" ? "Health Connect isn't available on this phone."
+            : h.status === "update_required" ? "Install or update Health Connect from the Play Store, then come back and connect."
+            : "Adds your watch's heart rate to runs, and uses sleep and resting heart rate to suggest how fresh you are. Your watch app (Zepp Life) must be sharing with Health Connect.";
+        const btn = !h.granted && h.status !== "unavailable"
+            ? `<div class="sp-row"><button class="btn-small" id="sp-health">${h.status === "update_required" ? "Get Health Connect" : "Connect"}</button></div>` : "";
+        return `<h4>Watch data</h4><p class="sp-note">${note}</p>${btn}`;
     }
 
     function bindPanel(el) {
@@ -421,6 +434,10 @@ const CloudSync = (() => {
             if (!file) return;
             file.text().then(importJson).then(msg => showToast(msg, 4000)).catch(err => showToast(`Import failed: ${err.message}`, 4000));
         });
+        if ($("sp-health")) $("sp-health").addEventListener("click", e => withBusy(e.target, () => Enrich.connectHealth().then(h => {
+            if (h.granted) showToast("Connected. Heart rate will be added to your runs.", 3000);
+            else if (h.status === "available") showToast("Not connected: allow heart rate, sleep and resting heart rate.", 4000);
+        })));
         if ($("sp-check-update")) $("sp-check-update").addEventListener("click", e => withBusy(e.target, () =>
             checkForUpdate(true).then(rel => { if (!rel) showToast("You're on the latest version.", 2500); })));
         if ($("sp-get-update")) $("sp-get-update").addEventListener("click", () => NativeTracker.openUrl(latestRelease.url));
@@ -441,5 +458,10 @@ const CloudSync = (() => {
 
 document.addEventListener("DOMContentLoaded", () => {
     // After script.js has opened the database
-    const wait = setInterval(() => { if (db) { clearInterval(wait); CloudSync.init(); } }, 200);
+    const wait = setInterval(() => {
+        if (!db) return;
+        clearInterval(wait);
+        CloudSync.init();
+        setTimeout(() => Enrich.init(), 4000);
+    }, 200);
 });

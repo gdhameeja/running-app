@@ -61,6 +61,7 @@ const RunDetail = (() => {
                     ${hasTrack ? `<div><span>${formatTime(Math.round(stoppedMs / 1000))}</span><small>stopped</small></div>` : ""}
                 </div>
                 <div id="rd-tags"></div>
+                <div id="rd-conditions">${conditionsHtml(run)}</div>
                 ${run.distance >= 300 ? `<button class="rd-race"><span class="material-icons">directions_run</span> Race this run</button>` : ""}
                 <div id="rd-map"></div>
                 <div class="rd-legend" id="rd-legend"></div>
@@ -78,6 +79,7 @@ const RunDetail = (() => {
             </div>`;
         el.style.display = "flex";
         document.body.classList.add("rd-open");
+        bindRpe(el);
         el.querySelector(".rd-back").addEventListener("click", () => close(false));
         const raceBtn = el.querySelector(".rd-race");
         if (raceBtn) raceBtn.addEventListener("click", () => raceRun(run));
@@ -234,6 +236,45 @@ const RunDetail = (() => {
         moved: ["Kept moving", "slow"], stood: ["Stood still", "slow"], info: ["", "info"], skipped: ["Not reached", "info"],
     };
 
+    // Weather, hills, heart rate, cadence, how you felt and how hard it was
+    function conditionsHtml(run) {
+        const items = [];
+        const w = run.weather;
+        if (w && !w.none) {
+            items.push(["thermostat", `${Math.round(w.tempC)}°C${w.feelsC != null && Math.abs(w.feelsC - w.tempC) >= 2 ? `, feels ${Math.round(w.feelsC)}°C` : ""}`,
+                `${w.humidity}% humidity · wind ${Math.round(w.windKmh)} km/h${w.precipMm > 0 ? ` · ${w.precipMm} mm rain` : ""}`]);
+        }
+        const e = run.elevation;
+        if (e && !e.none) {
+            const hf = RunAnalysis.hillFactor(run);
+            items.push(["terrain", `+${e.gain} m / −${e.loss} m`,
+                hf > 1.01 ? `hills: like ${formatPace(run.pace / hf)} /km on the flat` : "flat enough"]);
+        }
+        if (run.hr && run.hr.samples && run.hr.samples.length) items.push(["favorite", `${run.hr.avg} bpm avg`, `max ${run.hr.max} · from your watch`]);
+        const cad = RunAnalysis.cadenceBetween(run, 0, run.time * 1000);
+        if (cad) items.push(["directions_walk", `${Math.round(cad)} steps/min`, "average cadence"]);
+        const r = run.readiness;
+        if (run.feel || r) {
+            const sleep = r && r.sleepMin != null ? `${Math.floor(r.sleepMin / 60)}h ${r.sleepMin % 60}m sleep` : "";
+            const rhr = r && r.restingHr != null ? `resting HR ${r.restingHr}` : "";
+            items.push(["bedtime", run.feel ? `Felt ${run.feel}` : "Before the run", [sleep, rhr].filter(Boolean).join(" · ")]);
+        }
+        const grid = items.map(([icon, main, sub]) =>
+            `<div class="rd-cond"><span class="material-icons">${icon}</span><div><b>${escapeHtml(main)}</b><small>${escapeHtml(sub || "")}</small></div></div>`).join("");
+        return `${grid ? `<div class="rd-cond-grid">${grid}</div>` : ""}${rpeHtml(run)}`;
+    }
+
+    // "How hard was that?" 1-10 and a note; the same block sits on the run summary
+    function rpeHtml(run) {
+        return `<div class="rpe-box" data-run="${run.runId}">
+            <div class="rpe-q">How hard was that?</div>
+            <div class="rpe-row">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n =>
+                `<button class="rpe-btn${run.rpe === n ? " on" : ""}" data-rpe="${n}">${n}</button>`).join("")}</div>
+            <div class="rpe-scale"><span>very easy</span><span>max effort</span></div>
+            <textarea class="rpe-note" rows="2" placeholder="Notes: legs, sleep, shoes, how it felt…">${escapeHtml(run.note || "")}</textarea>
+        </div>`;
+    }
+
     // Where a Tune-In run's paces came from, and how the main set went
     function tuneInNote(run) {
         const t = run.guided.tuneIn;
@@ -276,6 +317,10 @@ const RunDetail = (() => {
             box.innerHTML = funSummaryHtml(rep);
             return;
         }
+        const hrText = (r) => {
+            const hr = r.status !== "skipped" && RunAnalysis.hrBetween(run, r.startMs, r.startMs + r.durationMs);
+            return hr ? `<br><small>♥ ${Math.round(hr.avg)} bpm</small>` : "";
+        };
         const dur = (ms) => ms >= 60000 && ms % 60000 === 0 ? `${ms / 60000} min` : formatTime(Math.round(ms / 1000));
         const range = (r) => r.lo == null ? r.target.label
             : r.lo <= 0 ? `${r.target.label}: under ${formatPace(r.hi)}` : `${r.target.label}: ${formatPace(r.lo)}–${formatPace(r.hi)}`;
@@ -298,7 +343,7 @@ const RunDetail = (() => {
                     return `<tr>
                         <td>${r.index + 1}</td>
                         <td><b>${escapeHtml(segmentLabel(r.seg))}</b> ${dur(r.durationMs)}<br><small>${escapeHtml(range(r))}</small></td>
-                        <td>${you}${r.partial ? "<br><small>ended early</small>" : ""}${r.shortForGps && r.paceSec ? "<br><small>short: GPS pace is rough</small>" : ""}</td>
+                        <td>${you}${hrText(r)}${r.partial ? "<br><small>ended early</small>" : ""}${r.shortForGps && r.paceSec ? "<br><small>short: GPS pace is rough</small>" : ""}</td>
                         <td><span class="rd-verdict ${cls}">${text}</span></td></tr>`;
                 }).join("")}
             </table>
@@ -390,7 +435,20 @@ const RunDetail = (() => {
         document.getElementById("rd-readout").innerHTML = text;
     }
 
-    return { open, close };
+    // Saves the 1-10 answer and note from any .rpe-box inside `container`
+    function bindRpe(container) {
+        container.querySelectorAll(".rpe-box").forEach(box => {
+            const id = Number(box.dataset.run);
+            const save = (patch) => getRunById(id).then(r => r && updateRun(Object.assign(r, patch)));
+            box.querySelectorAll(".rpe-btn").forEach(b => b.addEventListener("click", () => {
+                box.querySelectorAll(".rpe-btn").forEach(x => x.classList.toggle("on", x === b));
+                save({ rpe: Number(b.dataset.rpe) }).then(() => showToast("Saved. Thanks!", 1200));
+            }));
+            box.querySelector(".rpe-note").addEventListener("change", e => save({ note: e.target.value.trim() || undefined }));
+        });
+    }
+
+    return { open, close, rpeHtml, bindRpe };
 })();
 
 function openRunDetail(runId) {

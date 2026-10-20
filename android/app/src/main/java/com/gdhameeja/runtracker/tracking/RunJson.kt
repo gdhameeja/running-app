@@ -65,6 +65,7 @@ object RunJson {
         put("motionAgeMs", e.lastMotionAt?.let { now - it } ?: JSONObject.NULL)
         put("currentSpeed", e.currentSpeed ?: JSONObject.NULL)
         put("currentSpeedAgeMs", e.currentSpeedAt?.let { now - it } ?: JSONObject.NULL)
+        put("cadence", e.cadence(now) ?: JSONObject.NULL)
         if (e.config.guided != null) {
             put("guided", JSONObject().apply {
                 put("index", e.guidedIndex)
@@ -103,9 +104,23 @@ object RunJson {
             }
         })
         put("track", JSONArray().apply { e.track.forEach { put(trackPoint(it)) } })
+        put("raw", JSONArray().apply { e.raw.forEach { put(rawFix(it)) } })
+        put("steps", JSONArray().apply { e.steps.forEach { (t, n) -> put(JSONArray().put(t).put(n)) } })
+        put("pauses", JSONArray().apply { e.pauses.forEach { (at, ms) -> put(JSONArray().put(at).put(ms)) } })
+        put("coachLog", JSONArray().apply { e.coachLog.forEach { (t, text) -> put(JSONArray().put(t).put(text)) } })
+        e.coach?.let { c ->
+            put("coachResults", JSONObject().apply {
+                put("eases", c.eases)
+                put("parts", JSONArray().apply {
+                    c.results.forEach { r ->
+                        put(JSONArray().put(r.index).put(r.target).put(r.actual?.let { round(it, 10.0) } ?: JSONObject.NULL))
+                    }
+                })
+            })
+        }
     }
 
-    /** `[timeMs, distanceM, lat, lng, speed|null, bearing|null]`, rounded to keep runs small (same as script.js). */
+    /** `[timeMs, distanceM, lat, lng, speed|null, bearing|null, altitude|null]`, rounded to keep runs small (same as script.js). */
     fun trackPoint(p: TrackPoint): JSONArray = JSONArray()
         .put(p.time)
         .put(round(p.distance, 10.0))
@@ -113,6 +128,17 @@ object RunJson {
         .put(round(p.lng, 1e7))
         .put(p.speed?.let { round(it, 100.0) } ?: JSONObject.NULL)
         .put(p.bearing?.let { round(it, 10.0) } ?: JSONObject.NULL)
+        .put(p.altitude?.let { round(it, 10.0) } ?: JSONObject.NULL)
+
+    /** `[timeMs, lat, lng, accuracy|null, altitude|null, speed|null, bearing|null]` (same as script.js). */
+    fun rawFix(f: RawFix): JSONArray = JSONArray()
+        .put(f.time)
+        .put(round(f.lat, 1e7))
+        .put(round(f.lng, 1e7))
+        .put(f.accuracy?.let { round(it, 10.0) } ?: JSONObject.NULL)
+        .put(f.altitude?.let { round(it, 10.0) } ?: JSONObject.NULL)
+        .put(f.speed?.let { round(it, 100.0) } ?: JSONObject.NULL)
+        .put(f.bearing?.let { round(it, 10.0) } ?: JSONObject.NULL)
 
     private fun round(v: Double, scale: Double) = Math.round(v * scale) / scale
 }

@@ -24,6 +24,9 @@ class PaceCoach(private val segments: List<GuidedSegment>) {
         const val MISS = 1.07
         const val EASE = 1.04
         const val MAX_EASES = 2
+        /** Below this (steps/min), "slow" becomes a cue about stride, not just pace. */
+        const val SHORT_STRIDE_SPM = 160.0
+        const val RESULT_MIN_MS = 20_000L
         private val NAG_SLOW = setOf("settle", "cruise", "push")
         private val NAG_FAST = setOf("settle", "cruise", "push", "float")
         private val EASED = setOf("settle", "cruise", "push", "surge", "float")
@@ -77,6 +80,10 @@ class PaceCoach(private val segments: List<GuidedSegment>) {
         private set
     private val samples = ArrayDeque<Pair<Long, Double>>()
 
+    /** How each paced part went: segment index, target pace, your pace (null if you stopped). */
+    data class Result(val index: Int, val target: Double, val actual: Double?)
+    val results = mutableListOf<Result>()
+
     val active get() = seg >= 0
 
     val role: String? get() = segments.getOrNull(seg)?.role
@@ -118,12 +125,19 @@ class PaceCoach(private val segments: List<GuidedSegment>) {
         }
     }
 
+    /** The run ended (or the last segment did): records how the current part went. */
+    fun finish(t: Long, dist: Double) {
+        if (seg >= 0) judge(t, dist)
+        seg = -1
+    }
+
     /** How the segment that just ended went; eases the rest of the run after two misses. */
     private fun judge(t: Long, dist: Double): List<String> {
         val s = segments.getOrNull(seg) ?: return emptyList()
         val target = pace() ?: return emptyList()
-        if (s.role !in JUDGED || s.durationSec * 1000L < JUDGED_MIN_MS) return emptyList()
         val d = dist - segStartDist
+        if (t - segStart >= RESULT_MIN_MS) results += Result(seg, target, if (d > 5) (t - segStart) / d else null)
+        if (s.role !in JUDGED || s.durationSec * 1000L < JUDGED_MIN_MS) return emptyList()
         val ratio = if (d > 5) (t - segStart) / d / target else Double.POSITIVE_INFINITY
         if (ratio > MISS) misses++ else if (ratio <= 1.03) misses = 0
         if (misses < 2 || eases >= MAX_EASES) return emptyList()
@@ -142,7 +156,7 @@ class PaceCoach(private val segments: List<GuidedSegment>) {
         return if (d >= 15) (last.first - from.first) / d else null
     }
 
-    fun tick(t: Long, dist: Double): List<String> {
+    fun tick(t: Long, dist: Double, cadence: Double? = null): List<String> {
         if (seg < 0) return emptyList()
         val last = samples.lastOrNull()
         if (last == null || t - last.first >= 1000) samples.addLast(t to dist)
@@ -165,8 +179,11 @@ class PaceCoach(private val segments: List<GuidedSegment>) {
 
         val p = spokenPace(target)
         val msg = when {
-            status == "slow" && s.role in NAG_SLOW ->
-                if (measured > target * 1.15) "Pick it up when you're ready. Aim for $p." else "A little quicker. Aim for $p."
+            status == "slow" && s.role in NAG_SLOW -> when {
+                cadence != null && cadence < SHORT_STRIDE_SPM -> "Quicker, lighter steps. Aim for $p."
+                measured > target * 1.15 -> "Pick it up when you're ready. Aim for $p."
+                else -> "A little quicker. Aim for $p."
+            }
             status == "fast" && s.role in NAG_FAST ->
                 if (s.role == "push") "Strong! $p is enough, save a bit." else "Ease back a touch, to $p. Save it for the pushes."
             status == "on" && lastStatus != "on" ->

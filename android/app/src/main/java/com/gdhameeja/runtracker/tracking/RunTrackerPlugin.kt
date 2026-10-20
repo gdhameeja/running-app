@@ -19,11 +19,18 @@ import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
+import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
+import androidx.activity.result.ActivityResult
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
+import java.time.Instant
 
 // JS bridge to RunTrackerService (see native-tracker.js for the web side).
 @CapacitorPlugin(
@@ -34,6 +41,8 @@ import java.io.File
             strings = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION],
         ),
         Permission(alias = "notifications", strings = [Manifest.permission.POST_NOTIFICATIONS]),
+        // Step counter, for cadence
+        Permission(alias = "activity", strings = [Manifest.permission.ACTIVITY_RECOGNITION]),
     ],
 )
 class RunTrackerPlugin : Plugin() {
@@ -58,11 +67,21 @@ class RunTrackerPlugin : Plugin() {
 
     @PluginMethod
     fun start(call: PluginCall) {
+        val aliases = mutableListOf<String>()
         if (getPermissionState("location") != PermissionState.GRANTED) {
-            val aliases = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                arrayOf("location", "notifications")
-            } else arrayOf("location")
-            requestPermissionForAliases(aliases, call, "startAfterPermissions")
+            aliases += "location"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) aliases += "notifications"
+        }
+        // Asked once; runs work without it, just with no cadence
+        val prefs = context.getSharedPreferences("run_tracker", Context.MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && getPermissionState("activity") != PermissionState.GRANTED &&
+            !prefs.getBoolean("activityAsked", false)
+        ) {
+            prefs.edit().putBoolean("activityAsked", true).apply()
+            aliases += "activity"
+        }
+        if (aliases.isNotEmpty()) {
+            requestPermissionForAliases(aliases.toTypedArray(), call, "startAfterPermissions")
             return
         }
         startService(call)
@@ -140,6 +159,76 @@ class RunTrackerPlugin : Plugin() {
                 RunTrackerService.snapshotFile(context).delete()
             }
             call.resolve()
+        }
+    }
+
+    // ─── Health Connect (watch heart rate, sleep, resting HR; enrich.js) ─────
+
+    private val health by lazy { HealthBridge(context) }
+    private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Resolves with `{ status, granted }`: status "available", "update_required" or "unavailable". */
+    @PluginMethod
+    fun healthStatus(call: PluginCall) {
+        val status = health.status()
+        if (status != "available") return call.resolve(JSObject().put("status", status).put("granted", false))
+        io.launch {
+            val granted = try { health.granted().containsAll(HealthBridge.READ) } catch (e: Exception) { false }
+            call.resolve(JSObject().put("status", status).put("granted", granted))
+        }
+    }
+
+    /** Shows Health Connect's permission screen; resolves with `{ granted }`. */
+    @PluginMethod
+    fun healthRequest(call: PluginCall) {
+        when (health.status()) {
+            "available" -> startActivityForResult(call, health.permissionIntent(), "healthPermissionResult")
+            "update_required" -> {
+                // Android 13 and older: Health Connect is an app from the Play Store
+                val uri = Uri.parse("market://details?id=com.google.android.apps.healthdata&url=healthconnect%3A%2F%2Fonboarding")
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, uri).setPackage("com.android.vending").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (e: Exception) { /* no Play Store */ }
+                call.resolve(JSObject().put("granted", false).put("status", "update_required"))
+            }
+            else -> call.resolve(JSObject().put("granted", false).put("status", "unavailable"))
+        }
+    }
+
+    @ActivityCallback
+    private fun healthPermissionResult(call: PluginCall?, result: ActivityResult) {
+        if (call == null) return
+        io.launch {
+            val granted = try { health.granted().containsAll(HealthBridge.READ) } catch (e: Exception) { false }
+            call.resolve(JSObject().put("granted", granted).put("status", "available"))
+        }
+    }
+
+    /** `{ start, end }` (epoch ms) -> `{ hr: [[epochMs, bpm], ...] }`. */
+    @PluginMethod
+    fun healthHeartRate(call: PluginCall) {
+        val start = call.getLong("start") ?: return call.reject("Missing start")
+        val end = call.getLong("end") ?: return call.reject("Missing end")
+        io.launch {
+            try {
+                call.resolve(JSObject().put("hr", health.heartRate(Instant.ofEpochMilli(start), Instant.ofEpochMilli(end))))
+            } catch (e: Exception) {
+                call.reject("Health Connect: ${e.message}")
+            }
+        }
+    }
+
+    /** `{ start, end }` (epoch ms) -> `{ sleep: [[startMs, endMs]], resting: [[epochMs, bpm]] }`. */
+    @PluginMethod
+    fun healthDaily(call: PluginCall) {
+        val start = Instant.ofEpochMilli(call.getLong("start") ?: return call.reject("Missing start"))
+        val end = Instant.ofEpochMilli(call.getLong("end") ?: return call.reject("Missing end"))
+        io.launch {
+            try {
+                call.resolve(JSObject().put("sleep", health.sleep(start, end)).put("resting", health.restingHeartRate(start, end)))
+            } catch (e: Exception) {
+                call.reject("Health Connect: ${e.message}")
+            }
         }
     }
 

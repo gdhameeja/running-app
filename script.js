@@ -38,6 +38,15 @@ let hiddenDuringRunMs = 0;
 let trackData = [];
 // Latest speed/bearing reported by the GPS receiver itself (Doppler), for the AR ghost view
 let lastGpsMotion = null;
+// Every fix as delivered, accepted or not: [moving ms, lat, lng, accuracy, altitude, speed, bearing]
+let rawData = [];
+let lastAltitude = null;
+// Step counter samples [moving ms, steps since start] (Android only), and pauses [moving ms at pause, ms paused]
+let stepData = [];
+let pauseData = [];
+// Everything said during the run, [moving ms, text], and how each Tune-In part went
+let coachLog = [];
+let coachResults = null;
 
 // ─── IndexedDB (v2: adds courseProgress store) ─────────────────────────────────
 
@@ -185,7 +194,9 @@ function displayRunSummary(run) {
     summaryElement.innerHTML = `
         <div class="rs-summary-title">Run complete · ${formatRunDate(run.startTime)}</div>
         ${run.estimatedDistance > 50 ? `<p class="summary-note">${(run.estimatedDistance / 1000).toFixed(2)} km was estimated in straight lines across GPS gaps (screen off or app in background), so the real distance is probably a little higher.</p>` : ""}
-        <p class="summary-extra"></p>`;
+        <p class="summary-extra"></p>
+        ${RunDetail.rpeHtml(run)}`;
+    RunDetail.bindRpe(summaryElement);
     summaryRunId = run.runId;
     setRunScreenState("finished");
     openRunScreen();
@@ -235,6 +246,7 @@ document.addEventListener("DOMContentLoaded", () => {
         .then(() => {
             checkForInterruptedRun();
             renderHomeRecent();
+            renderFeelPicker();
             updateHomeGpsWatch();
         })
         .catch(error => console.error("Failed to initialize database:", error));
@@ -288,6 +300,7 @@ function initTabs() {
             if (tab.dataset.tab === "track") {
                 setTimeout(() => map.invalidateSize(), 100);
                 renderHomeRecent();
+                renderFeelPicker();
             }
             updateHomeGpsWatch();
         });
@@ -317,6 +330,12 @@ document.getElementById("start").addEventListener("click", () => {
     elapsedTime = 0;
     timeSeriesData = [];
     trackData = [];
+    rawData = [];
+    lastAltitude = null;
+    stepData = [];
+    pauseData = [];
+    coachLog = [];
+    coachResults = null;
     lastGpsMotion = null;
     currentSpeed = null;
     lastTimeSeriesDistance = 0;
@@ -354,6 +373,9 @@ document.getElementById("start").addEventListener("click", () => {
                     title: guidedRun.session.title, segments: guidedRun.segments,
                     tuneIn: guidedRun.session.tuneIn || undefined,
                 } : null,
+                // How you felt going in, and what your watch said about last night (enrich.js)
+                feel: todayFeel().feel || undefined,
+                readiness: Enrich.readinessNow() || undefined,
             });
         })
         .then(() => {
@@ -405,6 +427,7 @@ document.getElementById("pause").addEventListener("click", () => {
         renderRunBar();
         if (guidedRun) pauseGuidedRun();
     } else {
+        pauseData.push([pausedTime - startTime, Date.now() - pausedTime]);
         startTime += (Date.now() - pausedTime);
         lastMilestoneTime += (Date.now() - pausedTime);
         prevPosition = null;
@@ -464,8 +487,16 @@ function endRun(endTime) {
     document.getElementById("pause").disabled = true;
     renderPauseButton(false);
 
-    if (isPaused) startTime += (endTime - pausedTime);
+    if (isPaused) {
+        if (!nativeRun) pauseData.push([pausedTime - startTime, endTime - pausedTime]);
+        startTime += (endTime - pausedTime);
+    }
     isPaused = false;
+    // The last Tune-In part counts too, even if you stopped early (web runs; the service does its own)
+    if (guidedRun && guidedRun.coach) {
+        guidedRun.coach.finish(endTime - startTime, totalDistance);
+        coachResults = { eases: guidedRun.coach.eases, parts: guidedRun.coach.results };
+    }
 
     if (ghostRace) {
         document.getElementById("ghost-panel").style.display = "none";
@@ -493,17 +524,29 @@ function endRun(endTime) {
             runData.track = trackData;
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
+            Object.assign(runData, extraRunData());
             return updateRun(runData).then(() => {
                 displayRunSummary(runData);
                 CloudSync.soon();
+                Enrich.afterRun();
             });
         })
         .catch(error => console.error("Error updating run:", error));
 }
 
+// The data for learning beyond distance and time (see docs/ANDROID.md, "Run data")
+function extraRunData() {
+    const out = { raw: rawData, pauses: pauseData, coachLog };
+    if (stepData.length) out.steps = stepData;
+    if (coachResults) out.coachResults = coachResults;
+    return out;
+}
+
 // ─── Utility ───────────────────────────────────────────────────────────────────
 
 function speakText(text) {
+    // Web runs keep their own coach log; the Android service logs what it says
+    if (!nativeRun && currentRunId && isRunLive()) coachLog.push([Math.round(runElapsedMs()), text]);
     if (NativeTracker.available) { NativeTracker.speak(text); return; }
     if (!window.speechSynthesis) return;
     const utterance = new SpeechSynthesisUtterance(text);
@@ -584,6 +627,7 @@ function autoSaveRun() {
             runData.track = trackData;
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
+            Object.assign(runData, extraRunData());
             store.put(runData);
         }
     };
@@ -784,11 +828,17 @@ function startTracking() {
         lastRawFixTime = now;
         updateGpsStatus(accuracy);
 
+        const gpsSpeed = Number.isFinite(position.coords.speed) ? position.coords.speed : null;
+        const gpsBearing = Number.isFinite(position.coords.heading) ? position.coords.heading : null;
+        const altitude = Number.isFinite(position.coords.altitude) ? position.coords.altitude : null;
+        const r1 = (x, k) => x == null ? null : Math.round(x * k) / k;
+        rawData.push([now - startTime, r1(position.coords.latitude, 1e7), r1(position.coords.longitude, 1e7),
+            r1(accuracy, 10), r1(altitude, 10), r1(gpsSpeed, 100), r1(gpsBearing, 10)]);
+        lastAltitude = altitude;
+
         if (accuracy > MAX_ACCURACY_M) return;
 
         let { latitude, longitude } = position.coords;
-        const gpsSpeed = Number.isFinite(position.coords.speed) ? position.coords.speed : null;
-        const gpsBearing = Number.isFinite(position.coords.heading) ? position.coords.heading : null;
         lastGpsMotion = { speed: gpsSpeed, bearing: gpsBearing, at: now };
 
         // After a GPS gap the old velocity says nothing about where you are now
@@ -914,6 +964,7 @@ function addTrackPoint(now, lat, lng, speed, bearing) {
         Math.round(lng * 1e7) / 1e7,
         speed == null ? null : Math.round(speed * 100) / 100,
         bearing == null ? null : Math.round(bearing * 10) / 10,
+        lastAltitude == null ? null : Math.round(lastAltitude * 10) / 10,
     ]);
 }
 
@@ -1285,16 +1336,65 @@ function renderCourseGrid() {
 
 const TUNE_IN_ID = "tune-in";
 const FEELS = { tired: "😮‍💨 Tired", normal: "🙂 Normal", fresh: "⚡ Fresh" };
-let tuneInFeel = "normal";
+
+// How you feel today: { feel: what you picked today or null, suggested: from your watch or null, why }
+function todayFeel() {
+    let picked = null;
+    try {
+        const saved = JSON.parse(localStorage.getItem("todayFeel") || "null");
+        if (saved && saved.date === new Date().toDateString()) picked = saved.feel;
+    } catch (e) { /* storage unavailable */ }
+    const r = Enrich.readiness();
+    return { feel: picked, suggested: r && r.feel, why: r && r.why };
+}
+
+function setTodayFeel(feel) {
+    try { localStorage.setItem("todayFeel", JSON.stringify({ date: new Date().toDateString(), feel })); } catch (e) { /* storage unavailable */ }
+    renderFeelPicker();
+}
+
+// The Tired / Normal / Fresh chips; tap the chosen one again to clear it
+function feelButtonsHtml() {
+    const f = todayFeel();
+    const current = f.feel || f.suggested;
+    return Object.keys(FEELS).map(k =>
+        `<button class="feel-btn${k === current ? " active" : ""}${!f.feel && k === f.suggested ? " suggested" : ""}" data-feel="${k}">${FEELS[k]}</button>`).join("");
+}
+
+function bindFeelButtons(container, after) {
+    container.querySelectorAll(".feel-btn").forEach(b => b.addEventListener("click", () => {
+        setTodayFeel(todayFeel().feel === b.dataset.feel ? null : b.dataset.feel);
+        if (after) after();
+    }));
+}
+
+function renderFeelPicker() {
+    const el = document.getElementById("home-feel");
+    if (!el) return;
+    const f = todayFeel();
+    el.innerHTML = `<div class="home-feel-q">How do you feel today?</div>
+        <div class="tunein-feel">${feelButtonsHtml()}</div>
+        ${!f.feel && f.suggested ? `<div class="home-feel-why">Suggested from your watch: ${escapeHtml(f.why || "")}</div>` : ""}`;
+    bindFeelButtons(el);
+}
 
 function tuneInDuration(sec) {
     return sec >= 60 && sec % 60 === 0 ? `${sec / 60} min` : sec > 60 ? formatTime(sec) : `${sec} s`;
 }
 
+// Today's weather for the plan, fetched once the card is shown (Enrich caches it)
+let tuneInWeather = null;
+
 function renderTuneInCard() {
     const el = document.getElementById("tunein-card");
+    Enrich.todayWeather().then(w => {
+        const changed = JSON.stringify(w) !== JSON.stringify(tuneInWeather);
+        tuneInWeather = w;
+        if (changed && w) renderTuneInCard();
+    });
     getAllRuns().then(runs => {
-        const plan = TuneInPlanner.plan(runs, Date.now(), tuneInFeel);
+        const f = todayFeel();
+        const plan = TuneInPlanner.plan(runs, Date.now(), f.feel || f.suggested || "normal", tuneInWeather);
         const head = `<div class="cc-header"><span class="cc-icon">🎚️</span><span class="cc-name">Tune-In Run</span></div>`;
         if (!plan.ready) {
             el.innerHTML = `<div class="tunein-card">${head}
@@ -1315,9 +1415,10 @@ function renderTuneInCard() {
         el.innerHTML = `<div class="tunein-card ready">${head}
             <div class="tunein-target"><b>${formatPace(i.targetPace)}</b> /km<small>average for the ${i.mainMin}-min main set</small></div>
             <p class="tunein-why">Your usual pace is ${formatPace(i.usualPace)} /km (last ${i.runsUsed} runs). Today: ${pct > 0 ? `${pct}% quicker` : "your usual average"}${i.capped ? ", held back by your 5K fitness" : ""}.${last}</p>
-            <div class="tunein-feel" role="group" aria-label="How do you feel today?">
-                ${Object.keys(FEELS).map(f => `<button class="feel-btn${f === tuneInFeel ? " active" : ""}" data-feel="${f}">${FEELS[f]}</button>`).join("")}
-            </div>
+            <div class="tunein-feel" role="group" aria-label="How do you feel today?">${feelButtonsHtml()}</div>
+            ${!f.feel && f.suggested ? `<p class="tunein-why">Suggested from your watch: ${escapeHtml(f.why || "")}.</p>` : ""}
+            ${i.heat > 0.005 ? `<p class="tunein-why">🌡️ ${Math.round(i.weather.feelsC ?? i.weather.tempC)}°C feels-like right now: target ${Math.round(i.heat * 100)}% easier for the heat.</p>` : ""}
+            ${i.hillFactor > 1.02 ? `<p class="tunein-why">⛰️ Your usual routes are hilly; paces are set for them.</p>` : ""}
             <p class="tunein-why"><b>${escapeHtml(sess.title.replace("Tune-In: ", ""))}</b>: ${i.about}. ${i.totalMin} min with warm-up and cool-down.</p>
             <details class="tunein-plan"><summary>See the plan</summary>
                 <ol>${sess.segments.map(x => `<li><span class="sc-segment seg-${x.type}">${x.label}</span>
@@ -1326,10 +1427,7 @@ function renderTuneInCard() {
             </details>
             <button class="up-next-start" id="tunein-start"><span class="material-icons">play_arrow</span> Start Tune-In run</button>
         </div>`;
-        el.querySelectorAll(".feel-btn").forEach(b => b.addEventListener("click", () => {
-            tuneInFeel = b.dataset.feel;
-            renderTuneInCard();
-        }));
+        bindFeelButtons(el, renderTuneInCard);
         document.getElementById("tunein-start").addEventListener("click", () => startGuidedSession(sess, TUNE_IN_ID, null, null));
     });
 }

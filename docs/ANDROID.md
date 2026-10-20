@@ -95,6 +95,42 @@ Runs also store what they were doing, for the run detail page:
 - `ratings`: effort check-ins from the old Tune-In course, `[[movingMs, rating 1-5], ...]`.
 - `updatedAt`: when the record last changed on this phone, for cloud sync.
 
+Recorded during the run (web and service alike):
+
+- `track` points carry altitude as a 7th value: `[..., speed, bearing, altitude]`.
+- `raw`: every fix as delivered, accepted or not, before filtering:
+  `[movingMs, lat, lng, accuracy, altitude, speed, bearing]`. Lets a better
+  filter re-process old runs.
+- `steps`: `[movingMs, steps since start]` every 5 s from the step counter
+  (Android, needs the "Physical activity" permission). Cadence for the run
+  details, and the pace coach says "quicker, lighter steps" instead of
+  "a little quicker" when you're slow at under 160 steps/min.
+- `pauses`: `[movingMs at the pause, ms paused]`, to line watch data up with moving time.
+- `coachLog`: `[movingMs, text]`, everything spoken.
+- `coachResults`: `{ eases, parts: [[segment index, target s/km, your s/km | null]] }` for Tune-In runs.
+
+Asked of you:
+
+- `feel`: Tired / Normal / Fresh, picked on the Run tab or the Tune-In card.
+- `readiness`: `{ sleepMin, restingHr, baseline, suggested }` from Health Connect at the start.
+- `rpe` (1-10) and `note`: the question on the run summary and run details.
+
+Filled in afterwards by `enrich.js` (old runs too, 25 per app start):
+
+- `elevation`: `{ points: [[distance m, elevation m], ...] every 100 m, gain, loss }`
+  from the Copernicus 90 m terrain model via Open-Meteo. `RunAnalysis.flatMetres`
+  turns it into hill-adjusted distance (Minetti's cost of running on a slope).
+- `weather`: `{ tempC, feelsC, humidity, dewPointC, windKmh, windDirDeg, precipMm }`
+  at the start (Open-Meteo forecast API for recent runs, its archive for older ones).
+- `hr`: `{ samples: [[ms since startTime, bpm]], avg, max }` from Health Connect,
+  whatever the watch app wrote there (Zepp Life does). Retried for 3 days,
+  as watches sync late.
+
+Tune-In uses these: each past run counts as if flat and cool, today's target is
+set for your typical route and today's heat, and a Tune-In you hit with heart
+rate above 92% of your max counts as too hard. The minimum Android version is 8.0,
+which Health Connect needs.
+
 ## Courses with scripted and coached segments
 
 Guided segments can carry `label` and `say` (their own name and spoken words;

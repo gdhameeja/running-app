@@ -471,6 +471,83 @@ const RunAnalysis = (() => {
         return { rows, onTarget, judged: judged.length, fade, p5 };
     }
 
+    // ─── Hills, heat, heart rate (data added by enrich.js) ───────────────────
+
+    // Energy cost of running on a gradient relative to flat ground (Minetti et
+    // al. 2002, J/kg/m). Uphill costs more; gentle downhill a little less;
+    // steep downhill more again (braking). Gradients clamped to ±25%.
+    function minettiFactor(grade) {
+        const g = Math.max(-0.25, Math.min(0.25, grade));
+        const cost = 155.4 * g ** 5 - 30.4 * g ** 4 - 43.3 * g ** 3 + 46.3 * g ** 2 + 19.5 * g + 3.6;
+        return cost / 3.6;
+    }
+
+    // `run.elevation.points` ([[distance m, elevation m], ...] every ~100 m) as
+    // flat-equivalent metres between two distances: the distance on flat ground
+    // that would cost the same energy. Without elevation data it's just the distance.
+    function flatMetres(run, fromM, toM) {
+        const pts = run && run.elevation && run.elevation.points;
+        if (!pts || pts.length < 2 || toM <= fromM) return Math.max(0, toM - fromM);
+        let total = 0;
+        for (let i = 1; i < pts.length; i++) {
+            const [d0, e0] = pts[i - 1], [d1, e1] = pts[i];
+            const lo = Math.max(d0, fromM), hi = Math.min(d1, toM);
+            if (hi <= lo || d1 <= d0) continue;
+            total += (hi - lo) * minettiFactor((e1 - e0) / (d1 - d0));
+        }
+        // Past the end of the profile, count it as flat
+        const covered = Math.max(0, Math.min(toM, pts[pts.length - 1][0]) - Math.max(fromM, pts[0][0]));
+        return total + (toM - fromM - covered);
+    }
+
+    // Hill factor of a stretch: flat-equivalent metres per metre (1 = flat).
+    // `fromMs`/`toMs` are moving time; the whole run when omitted.
+    function hillFactor(run, fromMs = 0, toMs = null) {
+        const series = seriesForRun(run);
+        if (!series || !run.elevation) return 1;
+        const end = toMs == null ? run.time * 1000 : toMs;
+        const a = distanceAtTime(series, fromMs), b = distanceAtTime(series, end);
+        return b - a > 50 ? flatMetres(run, a, b) / (b - a) : 1;
+    }
+
+    // How much heat slows you, as a fraction of pace: ~0.4% per °C of
+    // feels-like temperature above 18 °C, up to 10%. A rough rule of thumb from
+    // race results in the heat (Ely et al. 2007), good enough to stop a hot
+    // day counting as a bad run.
+    function heatSlowdown(weather) {
+        if (!weather) return 0;
+        const t = weather.feelsC != null ? weather.feelsC : weather.tempC;
+        if (t == null) return 0;
+        return Math.min(0.1, Math.max(0, t - 18) * 0.004);
+    }
+
+    // Moving ms into the run -> ms since `run.startTime` on the clock, using `run.pauses`.
+    function wallOffset(run, movingMs) {
+        let t = movingMs;
+        (run.pauses || []).forEach(([at, ms]) => { if (at <= movingMs) t += ms; });
+        return t;
+    }
+
+    // Heart rate over a stretch of moving time: { avg, max, n } or null
+    function hrBetween(run, fromMs, toMs) {
+        const samples = run.hr && run.hr.samples;
+        if (!samples || !samples.length) return null;
+        const a = wallOffset(run, fromMs), b = wallOffset(run, toMs);
+        const xs = samples.filter(([t]) => t >= a && t <= b).map(x => x[1]);
+        if (!xs.length) return null;
+        return { avg: xs.reduce((s, x) => s + x, 0) / xs.length, max: Math.max(...xs), n: xs.length };
+    }
+
+    // Steps per minute over a stretch of moving time, from `run.steps`
+    function cadenceBetween(run, fromMs, toMs) {
+        const st = run.steps;
+        if (!st || st.length < 2) return null;
+        const inside = st.filter(([t]) => t >= fromMs && t <= toMs);
+        if (inside.length < 2) return null;
+        const first = inside[0], last = inside[inside.length - 1];
+        return last[0] > first[0] ? (last[1] - first[1]) * 60000 / (last[0] - first[0]) : null;
+    }
+
     // ─── Formatting / parsing ────────────────────────────────────────────────
 
     // "24:59" or "1:05:00" to ms; null if it doesn't parse. Phone number pads
@@ -505,6 +582,7 @@ const RunAnalysis = (() => {
         routeSignature, coverage, sameRoute, groupRoutes, rankRoute,
         ghostCue, spokenMetres, CUE_EVERY_M,
         fiveKPace, segmentTarget, guidedReport, parseDuration, formatDistance,
+        minettiFactor, flatMetres, hillFactor, heatSlowdown, wallOffset, hrBetween, cadenceBetween,
     };
 })();
 

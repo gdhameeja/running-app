@@ -25,6 +25,11 @@ const NativeTracker = (() => {
         saveFile: (name, text) => call("saveFile", { name, text }).then(r => r.location),
         openUrl: (url) => call("openUrl", { url }),
         appInfo: () => call("appInfo"),
+        // Watch data through Health Connect (enrich.js)
+        healthStatus: () => call("healthStatus"),
+        healthRequest: () => call("healthRequest"),
+        healthHeartRate: (start, end) => call("healthHeartRate", { start, end }).then(r => r.hr || []),
+        healthDaily: (start, end) => call("healthDaily", { start, end }),
         isIgnoringBatteryOptimizations: () => call("isIgnoringBatteryOptimizations").then(r => r.value),
         requestBatteryExemption: () => call("requestBatteryExemption"),
         onUpdate: (cb) => cap.addListener("RunTracker", "update", cb),
@@ -222,6 +227,11 @@ function applyNativeSnapshot(run) {
     estimatedDistance = run.estimatedDistance;
     timeSeriesData = run.timeSeries || [];
     trackData = run.track || [];
+    rawData = run.raw || [];
+    stepData = run.steps || [];
+    pauseData = run.pauses || [];
+    coachLog = run.coachLog || [];
+    coachResults = run.coachResults || null;
     const segs = run.pathSegments && run.pathSegments.length ? run.pathSegments : [[]];
     pathSegments = segs.slice(0, -1);
     currentSegment = segs[segs.length - 1];
@@ -303,5 +313,10 @@ function saveNativeSnapshot(run) {
         track: run.track || [],
         pathSegments: run.pathSegments || [],
         estimatedDistance: run.estimatedDistance,
+        raw: run.raw || [],
+        steps: run.steps || undefined,
+        pauses: run.pauses || [],
+        coachLog: run.coachLog || [],
+        coachResults: run.coachResults || undefined,
     })));
 }

@@ -2181,3 +2181,27 @@ summary.session-week-header > span:first-child { flex: 1; text-align: left; }
 }
 .sp-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .sp-row .btn-small { margin: 0; }
+
+/* ═══ Today's feel, effort question, run conditions ═══ */
+
+#home-feel { margin: 4px 0 12px; text-align: left; }
+.home-feel-q { font-size: 14px; color: #546e7a; margin-bottom: 4px; }
+.home-feel-why { font-size: 12px; color: #78909c; margin-top: 2px; }
+#home-feel .feel-btn { background: #eceff1; color: #37474f; }
+#home-feel .feel-btn.active { background: #3949ab; color: #fff; }
+.feel-btn.suggested { outline: 2px dashed currentColor; outline-offset: -4px; }
+
+.rpe-box { margin: 12px 0; padding: 12px; border-radius: 10px; background: #f5f7fb; text-align: left; color: #263238; }
+.rpe-q { font-size: 15px; font-weight: 500; margin-bottom: 8px; }
+.rpe-row { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
+.rpe-btn { margin: 0; padding: 8px 0; font-size: 14px; border-radius: 6px; background: #e8eaf6; color: #283593; min-width: 0; }
+.rpe-btn.on { background: #3949ab; color: #fff; }
+.rpe-scale { display: flex; justify-content: space-between; font-size: 11px; color: #78909c; margin: 2px 0 8px; }
+.rpe-note { width: 100%; box-sizing: border-box; padding: 8px; font: inherit; font-size: 14px; border: 1px solid #cfd8dc; border-radius: 8px; resize: vertical; }
+
+.rd-cond-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; text-align: left; }
+.rd-cond { display: flex; gap: 8px; align-items: flex-start; padding: 8px; border-radius: 8px; background: #f5f7fb; }
+.rd-cond .material-icons { font-size: 20px; color: #3949ab; }
+.rd-cond b { display: block; font-size: 14px; font-weight: 500; }
+.rd-cond small { display: block; font-size: 12px; color: #607d8b; }
+@media (max-width: 360px) { .rd-cond-grid { grid-template-columns: 1fr; } }

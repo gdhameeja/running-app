@@ -6,10 +6,13 @@
 // Before the run (TuneInPlanner):
 //  - Learns your usual pace from your last 10 runs (1.5 km+, last 120 days).
 //    Recent runs count more, and runs far off the median (a walk, a race)
-//    are left out. It needs 5 runs before it plans anything.
+//    are left out. It needs 5 runs before it plans anything. Each run counts
+//    as if it were flat and cool (hills and heat from enrich.js), and today's
+//    target is turned back into your typical route and today's weather.
 //  - Today's average is a few % quicker than usual: just outside your comfort
 //    zone. The step grows after a Tune-In run you hit and shrinks after one
-//    you missed, and "Tired"/"Fresh" nudge it for the day.
+//    you missed (or hit with your heart rate near its max), and
+//    "Tired"/"Fresh" nudge it for the day.
 //  - It reaches that average with intervals (push, surge, float, recover):
 //    the paces are solved so the time-weighted average speed is the target,
 //    and capped by your predicted 5K pace so no part asks for more than
@@ -67,6 +70,9 @@ class PaceCoach {
     static MISS = 1.07;
     static EASE = 1.04;
     static MAX_EASES = 2;
+    // Below this (steps/min), "slow" becomes a cue about stride, not just pace
+    static SHORT_STRIDE_SPM = 160;
+    static RESULT_MIN_MS = 20000;
     // Parts whose pace gets checked, eased, and judged
     static NAG_SLOW = ["settle", "cruise", "push"];
     static NAG_FAST = ["settle", "cruise", "push", "float"];
@@ -87,6 +93,8 @@ class PaceCoach {
         this.status = null;
         this.now = null;
         this.samples = [];
+        // How each paced part went: [segment index, target pace, your pace | null]
+        this.results = [];
     }
 
     static isCoached(segments) {
@@ -132,12 +140,20 @@ class PaceCoach {
         }
     }
 
+    // The run ended (or the last segment did): records how the current part went
+    finish(t, dist) {
+        if (this.seg >= 0) this.judge(t, dist);
+        this.seg = -1;
+    }
+
     // How the segment that just ended went; eases the rest of the run after two misses
     judge(t, dist) {
         const s = this.segments[this.seg];
         const target = this.pace();
-        if (!s || target == null || !PaceCoach.JUDGED.includes(s.role) || s.durationMs < PaceCoach.JUDGED_MIN_MS) return [];
+        if (!s || target == null) return [];
         const d = dist - this.segStartDist;
+        if (t - this.segStart >= PaceCoach.RESULT_MIN_MS) this.results.push([this.seg, target, d > 5 ? (t - this.segStart) / d : null]);
+        if (!PaceCoach.JUDGED.includes(s.role) || s.durationMs < PaceCoach.JUDGED_MIN_MS) return [];
         const ratio = d > 5 ? (t - this.segStart) / d / target : Infinity;
         if (ratio > PaceCoach.MISS) this.misses++;
         else if (ratio <= 1.03) this.misses = 0;
@@ -159,7 +175,7 @@ class PaceCoach {
         return d >= 15 ? (last[0] - from[0]) / d : null;
     }
 
-    tick(t, dist) {
+    tick(t, dist, cadence = null) {
         if (this.seg < 0) return [];
         const last = this.samples[this.samples.length - 1];
         if (!last || t - last[0] >= 1000) this.samples.push([t, dist]);
@@ -178,7 +194,8 @@ class PaceCoach {
         const p = spokenPace(target);
         let msg = null;
         if (this.status === "slow" && PaceCoach.NAG_SLOW.includes(s.role)) {
-            msg = this.now > target * 1.15 ? `Pick it up when you're ready. Aim for ${p}.` : `A little quicker. Aim for ${p}.`;
+            msg = cadence != null && cadence < PaceCoach.SHORT_STRIDE_SPM ? `Quicker, lighter steps. Aim for ${p}.`
+                : this.now > target * 1.15 ? `Pick it up when you're ready. Aim for ${p}.` : `A little quicker. Aim for ${p}.`;
         } else if (this.status === "fast" && PaceCoach.NAG_FAST.includes(s.role)) {
             msg = s.role === "push" ? `Strong! ${p} is enough, save a bit.` : `Ease back a touch, to ${p}. Save it for the pushes.`;
         } else if (this.status === "on" && this.lastStatus !== "on") {
@@ -253,9 +270,15 @@ const TuneInPlanner = (() => {
             .slice(0, POOL);
     }
 
-    // Usual speed (m/s): recency-weighted mean, leaving out runs 15%+ off the median
+    // A run's speed (m/s) as if it were flat and cool
+    function normalSpeed(r) {
+        const RA = analysis();
+        return r.distance * RA.hillFactor(r) / r.time * (1 + RA.heatSlowdown(r.weather));
+    }
+
+    // Usual speed (m/s, flat and cool): recency-weighted mean, leaving out runs 15%+ off the median
     function usualSpeed(runs) {
-        const speeds = runs.map(r => r.distance / r.time);
+        const speeds = runs.map(normalSpeed);
         const sorted = [...speeds].sort((a, b) => a - b);
         const median = sorted[Math.floor(sorted.length / 2)];
         let sum = 0, weights = 0;
@@ -268,18 +291,27 @@ const TuneInPlanner = (() => {
         return sum / weights;
     }
 
-    // How a Tune-In run went: main-set pace against its target
+    // How a Tune-In run went: main-set pace against its target, judged on flat-
+    // equivalent pace when the route's hills are known; plus heart rate if any
     function result(run) {
         const tune = run.guided && run.guided.tuneIn;
         if (!tune) return null;
-        const series = analysis().seriesForRun(run);
+        const RA = analysis();
+        const series = RA.seriesForRun(run);
         const end = Math.min(tune.mainEndMs, run.time * 1000);
         const finished = run.time * 1000 >= tune.mainEndMs - 5000;
         if (!series || end - tune.mainStartMs < 60000) return { finished: false, pace: null, target: tune.targetPace, ratio: Infinity };
-        const RA = analysis();
         const d = RA.distanceAtTime(series, end) - RA.distanceAtTime(series, tune.mainStartMs);
         const pace = d > 0 ? (end - tune.mainStartMs) / d : null;
-        return { finished, pace, target: tune.targetPace, ratio: pace ? pace / tune.targetPace : Infinity };
+        const hills = RA.hillFactor(run, tune.mainStartMs, end) / (tune.hillFactor || 1);
+        const hr = RA.hrBetween(run, tune.mainStartMs, end);
+        return { finished, pace, target: tune.targetPace, ratio: pace ? pace / hills / tune.targetPace : Infinity, hills, hr };
+    }
+
+    // Your highest heart rate seen across runs, once 3 runs have heart rate
+    function maxHeartRate(runs) {
+        const withHr = runs.filter(r => r.hr && r.hr.max);
+        return withHr.length >= 3 ? Math.max(...withHr.map(r => r.hr.max)) : null;
     }
 
     // The learned step: bigger after a Tune-In run you hit, smaller after one you missed
@@ -289,9 +321,12 @@ const TuneInPlanner = (() => {
         if (!last) return { step: BASE_STEP, last: null };
         const prev = last.guided.tuneIn.baseStep;
         const res = result(last);
+        // Heart rate says how hard it really was: near your max is too far outside comfort
+        const maxHr = maxHeartRate(runs);
+        res.hrShare = res.hr && maxHr ? res.hr.avg / maxHr : null;
         let step = prev;
-        if (!res.finished || res.ratio > 1.04) step = Math.max(MIN_STEP, prev - 0.015);
-        else if (res.ratio <= 1.01) step = Math.min(MAX_STEP, prev + 0.005);
+        if (!res.finished || res.ratio > 1.04 || res.hrShare > 0.92) step = Math.max(MIN_STEP, prev - 0.015);
+        else if (res.ratio <= 1.01) step = Math.min(MAX_STEP, prev + (res.hrShare != null && res.hrShare < 0.85 ? 0.01 : 0.005));
         return { step, last: res };
     }
 
@@ -344,12 +379,17 @@ const TuneInPlanner = (() => {
     }
 
     // { ready: false, have, need } until there are enough runs, then
-    // { ready: true, session, info }.
-    function plan(runs, now = Date.now(), feel = "normal") {
+    // { ready: true, session, info }. `weather` is today's (enrich.js), if known.
+    function plan(runs, now = Date.now(), feel = "normal", weather = null) {
         const recent = pool(runs, now);
         if (recent.length < NEED_RUNS) return { ready: false, have: recent.length, need: NEED_RUNS };
 
-        const usual = usualSpeed(recent);
+        // Your usual pace on your typical route, in today's weather
+        const RA = analysis();
+        const factors = recent.map(r => RA.hillFactor(r)).sort((a, b) => a - b);
+        const hillFactor = factors[Math.floor(factors.length / 2)];
+        const heat = RA.heatSlowdown(weather);
+        const usual = usualSpeed(recent) / hillFactor / (1 + heat);
         const learned = learnedStep(runs, now);
         const step = Math.max(0, learned.step + (FEEL_STEP[feel] || 0));
         const done = runs.filter(r => r.endTime && r.guided && r.guided.tuneIn).length;
@@ -380,7 +420,8 @@ const TuneInPlanner = (() => {
         const targetPace = mainS / (metres / 1000);
         const tuneIn = {
             template: tpl.name, usualPace: 1000 / usual, targetPace, step, baseStep: learned.step, feel,
-            capped: !!capped, runsUsed: recent.length,
+            capped: !!capped, runsUsed: recent.length, hillFactor, heat,
+            weather: weather ? { tempC: weather.tempC, feelsC: weather.feelsC } : undefined,
             mainStartMs: 5000 + WARMUP_S * 1000, mainEndMs: 5000 + (WARMUP_S + mainS) * 1000,
         };
         const total = Math.round((WARMUP_S + mainS + COOLDOWN_S) / 60);
@@ -395,7 +436,7 @@ const TuneInPlanner = (() => {
         };
     }
 
-    return { plan, result, usualSpeed, NEED_RUNS, TEMPLATES };
+    return { plan, result, usualSpeed, maxHeartRate, NEED_RUNS, TEMPLATES };
 })();
 
 if (typeof module !== "undefined") module.exports = { PaceCoach, TuneInPlanner, EFFORT_LABELS, spokenPace, coachPace };

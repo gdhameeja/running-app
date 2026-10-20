@@ -37,6 +37,22 @@ data class TrackPoint(
     val lng: Double,
     val speed: Double? = null,
     val bearing: Double? = null,
+    val altitude: Double? = null,
+)
+
+/**
+ * Every fix the receiver delivered while running, accepted or not, unfiltered:
+ * moving time, position, reported accuracy and altitude. Lets a better filter
+ * re-process the run later, and shows which runs had poor GPS.
+ */
+data class RawFix(
+    val time: Long,
+    val lat: Double,
+    val lng: Double,
+    val accuracy: Double?,
+    val altitude: Double?,
+    val speed: Double?,
+    val bearing: Double?,
 )
 
 /**
@@ -192,6 +208,8 @@ class RunEngine(val config: RunConfig, now: Long) {
         const val MAX_ACCURACY_M = 20.0
         const val TIME_SERIES_INTERVAL_M = 100.0
         const val GUIDED_COUNTDOWN_MS = 5_000L
+        const val STEP_SAMPLE_MS = 5_000L
+        const val CADENCE_WINDOW_MS = 30_000L
 
         // Spoken ghost updates; same rules as ghostCue in analysis.js
         const val CUE_EVERY_M = 250.0
@@ -286,6 +304,15 @@ class RunEngine(val config: RunConfig, now: Long) {
     val gapCoords: MutableList<Pair<LatLng, LatLng>> = mutableListOf()
     val timeSeries: MutableList<TimePoint> = mutableListOf()
     val track: MutableList<TrackPoint> = mutableListOf()
+    val raw: MutableList<RawFix> = mutableListOf()
+    /** Steps taken since the start, sampled every [STEP_SAMPLE_MS]: (moving ms, steps). */
+    val steps: MutableList<Pair<Long, Long>> = mutableListOf()
+    private var stepBase: Long? = null
+    private var stepCount = 0L
+    /** Each pause: (moving ms when it started, how long it lasted in ms). */
+    val pauses: MutableList<Pair<Long, Long>> = mutableListOf()
+    /** Everything said during the run: (moving ms, phrase). */
+    val coachLog: MutableList<Pair<Long, String>> = mutableListOf()
 
     // Latest speed/bearing straight from the GPS receiver (Doppler), for the AR view's direction of travel
     var lastSpeed: Double? = null
@@ -300,6 +327,7 @@ class RunEngine(val config: RunConfig, now: Long) {
         private set
     var currentSpeedAt: Long? = null
         private set
+    private var lastAltitude: Double? = null
 
     private var prevPosition: LatLng? = null
     private var lastFixTime = 0L
@@ -352,6 +380,7 @@ class RunEngine(val config: RunConfig, now: Long) {
 
     fun resume(now: Long) {
         if (status != Status.PAUSED) return
+        pauses.add((pausedAt - startTime) to (now - pausedAt))
         startTime += now - pausedAt
         lastMilestoneTime += now - pausedAt
         prevPosition = null
@@ -362,7 +391,12 @@ class RunEngine(val config: RunConfig, now: Long) {
 
     fun finish(now: Long) {
         if (status == Status.FINISHED) return
-        if (status == Status.PAUSED) startTime += now - pausedAt
+        if (status == Status.PAUSED) {
+            pauses.add((pausedAt - startTime) to (now - pausedAt))
+            startTime += now - pausedAt
+        }
+        // A run stopped early still records how its last part went
+        coach?.finish(now - startTime, totalDistance)
         endTime = now
         status = Status.FINISHED
     }
@@ -373,9 +407,11 @@ class RunEngine(val config: RunConfig, now: Long) {
      */
     fun onLocation(
         rawLat: Double, rawLon: Double, accuracy: Double, now: Long,
-        speed: Double? = null, bearing: Double? = null,
+        speed: Double? = null, bearing: Double? = null, altitude: Double? = null,
     ): List<String> {
         if (status != Status.RUNNING) return emptyList()
+        raw.add(RawFix(now - startTime, rawLat, rawLon, accuracy.takeIf { it.isFinite() && it < 1e6 }, altitude, speed, bearing))
+        lastAltitude = altitude
         val rawGapStart = lastRawFixTime
         lastRawFixTime = now
         lastAccuracy = accuracy
@@ -454,6 +490,43 @@ class RunEngine(val config: RunConfig, now: Long) {
         if (totalDistance >= nextMilestone) speech += milestoneMessage(now)
         speech += checkGhost(now)
         ghostCue(now)?.let { speech += it }
+        return logged(speech, now)
+    }
+
+    /**
+     * The phone's step counter (steps since boot). Keeps steps since the start,
+     * sampled every few seconds, for cadence.
+     */
+    fun onSteps(sinceBoot: Long, now: Long) {
+        val base = stepBase
+        if (base == null || sinceBoot < base) {
+            // First reading, or the counter reset (reboot): carry on from where we were
+            stepBase = sinceBoot - stepCount
+            return
+        }
+        if (status != Status.RUNNING) {
+            // Steps while paused don't count
+            stepBase = sinceBoot - stepCount
+            return
+        }
+        stepCount = sinceBoot - base
+        val t = now - startTime
+        if (steps.isEmpty() || t - steps.last().first >= STEP_SAMPLE_MS) steps.add(t to stepCount)
+    }
+
+    /** Steps per minute over the last 30 s, or null without a step counter. */
+    fun cadence(now: Long): Double? {
+        if (steps.size < 2) return null
+        val last = steps.last()
+        if (elapsedMs(now) - last.first > 15_000) return null
+        val from = steps.lastOrNull { it.first <= last.first - CADENCE_WINDOW_MS } ?: steps.first()
+        val dt = last.first - from.first
+        return if (dt >= 15_000) (last.second - from.second) * 60_000.0 / dt else null
+    }
+
+    private fun logged(speech: List<String>, now: Long): List<String> {
+        val t = elapsedMs(now)
+        speech.forEach { coachLog.add(t to it) }
         return speech
     }
 
@@ -463,7 +536,7 @@ class RunEngine(val config: RunConfig, now: Long) {
         val speech = mutableListOf<String>()
         speech += checkGhost(now)
         if (status == Status.RUNNING) speech += tickGuided(now)
-        return speech
+        return logged(speech, now)
     }
 
     /** Whether the pace coach is running right now. */
@@ -493,6 +566,7 @@ class RunEngine(val config: RunConfig, now: Long) {
         if (index >= segments.size) {
             guidedIndex = segments.size
             guidedCompleted = true
+            coach?.finish(elapsed, totalDistance)
             speech += "Workout complete! Great job!"
             finish(now)
             return speech
@@ -507,7 +581,7 @@ class RunEngine(val config: RunConfig, now: Long) {
             }
         }
         if (index < 0) return speech
-        coach?.let { speech += it.tick(elapsed, totalDistance) }
+        coach?.let { speech += it.tick(elapsed, totalDistance, cadence(now)) }
 
         val seg = segments[index]
         val remaining = (guidedSegmentEnds[index + 1] - elapsed) / 1000.0
@@ -623,6 +697,6 @@ class RunEngine(val config: RunConfig, now: Long) {
     }
 
     private fun addTrackPoint(now: Long, point: LatLng, speed: Double?, bearing: Double?) {
-        track.add(TrackPoint(now - startTime, totalDistance, point.lat, point.lng, speed, bearing))
+        track.add(TrackPoint(now - startTime, totalDistance, point.lat, point.lng, speed, bearing, lastAltitude))
     }
 }

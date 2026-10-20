@@ -67,7 +67,7 @@ class RunEngineTest {
         assertEquals(0.0, track.last().bearing!!, 0.0)
         assertEquals(3.5, r.engine.lastSpeed!!, 0.0)
         val json = RunJson.trackPoint(track.last())
-        assertEquals(6, json.length())
+        assertEquals(7, json.length()) // ..., speed, bearing, altitude
         assertEquals(61_000L, json.getLong(0))
     }
 

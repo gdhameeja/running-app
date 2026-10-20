@@ -11,6 +11,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -138,6 +142,7 @@ class RunTrackerService : Service(), LocationListener {
             .apply { acquire(6 * 60 * 60 * 1000L) }
 
         requestLocation()
+        startSteps()
         persist(now)
         main.post(ticker)
     }
@@ -174,6 +179,7 @@ class RunTrackerService : Service(), LocationListener {
         val now = System.currentTimeMillis()
         main.removeCallbacks(ticker)
         locationManager.removeUpdates(this)
+        stopSteps()
         val snapshot = persist(now)
         publish(now)
         // Let the last announcement ("Workout complete!", ghost result) finish
@@ -191,6 +197,7 @@ class RunTrackerService : Service(), LocationListener {
     override fun onDestroy() {
         main.removeCallbacks(ticker)
         locationManager.removeUpdates(this)
+        stopSteps()
         engine?.let { if (it.status != RunEngine.Status.FINISHED) persist(System.currentTimeMillis()) }
         wakeLock?.let { if (it.isHeld) it.release() }
         speaker.shutdown()
@@ -218,9 +225,35 @@ class RunTrackerService : Service(), LocationListener {
         val accuracy = if (location.hasAccuracy()) location.accuracy.toDouble() else Double.MAX_VALUE
         val speed = if (location.hasSpeed()) location.speed.toDouble() else null
         val bearing = if (location.hasBearing()) location.bearing.toDouble() else null
-        speakAll(e.onLocation(location.latitude, location.longitude, accuracy, now, speed, bearing))
+        val altitude = if (location.hasAltitude()) location.altitude else null
+        speakAll(e.onLocation(location.latitude, location.longitude, accuracy, now, speed, bearing, altitude))
         if (now - lastPersist >= PERSIST_EVERY_MS) persist(now)
         publish(now)
+    }
+
+    // ─── Step counter (cadence) ──────────────────────────────────────────────
+
+    private val stepListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            engine?.onSteps(event.values[0].toLong(), System.currentTimeMillis())
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    private fun startSteps() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.w(TAG, "Physical activity permission missing; no cadence")
+            return
+        }
+        val sensors = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val counter = sensors.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) ?: return
+        sensors.registerListener(stepListener, counter, SensorManager.SENSOR_DELAY_NORMAL)
+    }
+
+    private fun stopSteps() {
+        (getSystemService(Context.SENSOR_SERVICE) as SensorManager).unregisterListener(stepListener)
     }
 
     @Deprecated("Deprecated in Java")

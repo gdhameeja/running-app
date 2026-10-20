@@ -946,6 +946,88 @@ function fakeRuns(n, km, pace, now) {
     assert(/Naruto run/.test(said) && /Shoulder taps/.test(said) && /best pace/.test(said), "Naruto runs, shoulder taps and best-pace bursts are in");
 })();
 
+// ─── Hills, heat, heart rate, readiness ──────────────────────────────────────
+
+console.log("\n=== Run Data Tests ===\n");
+
+(function testHillsAndHeat() {
+    assertApprox(RA.minettiFactor(0), 1, 1e-9, "Flat costs what flat costs");
+    assert(RA.minettiFactor(0.05) > 1.25 && RA.minettiFactor(-0.05) < 0.8 && RA.minettiFactor(-0.25) > RA.minettiFactor(-0.2),
+        "Uphill costs more, gentle downhill less, steep downhill more again (braking)");
+    const flat = { elevation: { points: [[0, 10], [1000, 10]] } };
+    const hill = { elevation: { points: [[0, 10], [500, 35], [1000, 10]] } }; // 5% up, 5% down
+    assertApprox(RA.flatMetres(flat, 0, 1000), 1000, 1e-6, "Flat route: flat metres = metres");
+    assert(RA.flatMetres(hill, 0, 1000) > 1000, `Up and back down costs more than flat (${RA.flatMetres(hill, 0, 1000).toFixed(0)} m)`);
+    assertApprox(RA.flatMetres({}, 0, 800), 800, 1e-9, "No elevation data: just the distance");
+    assert(RA.heatSlowdown(null) === 0 && RA.heatSlowdown({ feelsC: 15 }) === 0, "Cool or unknown weather: no allowance");
+    assertApprox(RA.heatSlowdown({ feelsC: 33 }), 0.06, 1e-9, "33°C feels-like: 6% slower is expected");
+    assert(RA.heatSlowdown({ tempC: 50 }) === 0.1, "Heat allowance is capped at 10%");
+})();
+
+(function testPausesHeartRateCadence() {
+    // Paused for 60 s after 120 s of moving time
+    const run = {
+        startTime: 0, time: 300, pauses: [[120000, 60000]],
+        hr: { samples: [[60000, 120], [100000, 130], [150000, 90], [200000, 160], [240000, 170]] },
+        steps: [[0, 0], [60000, 170], [120000, 340], [180000, 520], [240000, 700]],
+    };
+    assert(RA.wallOffset(run, 60000) === 60000 && RA.wallOffset(run, 180000) === 240000, "Moving time maps to clock time across a pause");
+    const hr = RA.hrBetween(run, 120000, 200000);
+    assert(hr && hr.n === 2 && hr.avg === 165, "Heart rate for a stretch skips samples from the pause");
+    assertApprox(RA.cadenceBetween(run, 120000, 240000), 180, 1e-9, "Cadence over a stretch from step samples");
+})();
+
+(function testPlannerHillsHeatHr() {
+    const now = Date.UTC(2026, 9, 21);
+    const race = fakeRuns(1, 5, 300, now - 30 * 86400000);
+    const flatRuns = [...fakeRuns(8, 5, 360, now), ...race];
+    const base = TuneInPlanner.plan(flatRuns, now).info;
+
+    // The same runs on a hilly route: usual pace on that route is unchanged
+    const hilly = flatRuns.map(r => Object.assign({}, r, { elevation: { points: [[0, 0], [1250, 50], [2500, 0], [3750, 50], [5000, 0]] } }));
+    const h = TuneInPlanner.plan(hilly, now).info;
+    assert(h.hillFactor > 1.01 && Math.abs(h.usualPace - base.usualPace) < 1, `Hilly usual route: same usual pace on it (hill factor ${h.hillFactor.toFixed(2)})`);
+
+    // One hot run among cool ones doesn't drag "usual" down
+    const hotSlow = flatRuns.map((r, i) => i === 0 ? Object.assign({}, r, { time: r.time * 1.06, pace: r.pace * 1.06, weather: { feelsC: 33 } }) : r);
+    assert(Math.abs(TuneInPlanner.plan(hotSlow, now).info.usualPace - base.usualPace) < 1.5, "A slow run in the heat counts as a normal one");
+
+    const hot = TuneInPlanner.plan(flatRuns, now, "normal", { tempC: 31, feelsC: 33 }).info;
+    assert(hot.targetPace > base.targetPace * 1.04 && hot.heat === 0.06, `Hot today: target eased (${hot.targetPace.toFixed(0)} vs ${base.targetPace.toFixed(0)} s/km)`);
+
+    // A Tune-In hit on pace, but with heart rate near max: the next one doesn't step up
+    const plan = TuneInPlanner.plan(flatRuns, now);
+    const tune = plan.session.tuneIn;
+    const tuneRun = (avgHr) => {
+        const time = plan.info.totalMin * 60, pace = plan.info.targetPace - 3, start = now - 3600000;
+        return {
+            runId: start, startTime: start, endTime: start + time * 1000, distance: time / pace * 1000, time, pace,
+            timeSeries: [{ distance: 0, time: 0 }, { distance: time / pace * 1000, time: time * 1000 }],
+            guided: { tuneIn: tune }, hr: { samples: [[400000, avgHr], [900000, avgHr]], avg: avgHr, max: avgHr },
+        };
+    };
+    const withMax = flatRuns.map((r, i) => i < 3 ? Object.assign({}, r, { hr: { samples: [], avg: 150, max: 190 } }) : r);
+    const redline = TuneInPlanner.plan([...withMax, tuneRun(182)], now + 1000).info;
+    const comfy = TuneInPlanner.plan([...withMax, tuneRun(155)], now + 1000).info;
+    assert(redline.baseStep < base.baseStep, `Hit, but at ${Math.round(182 / 190 * 100)}% of max heart rate: next step shrinks`);
+    assert(comfy.baseStep > base.baseStep + 0.007, "Hit with heart rate to spare: next step grows more");
+})();
+
+(function testReadinessSuggestion() {
+    global.RunAnalysis = RA;
+    const Enrich = require("./enrich.js");
+    const now = Date.UTC(2026, 9, 21, 7);
+    const H = 3600000, D = 86400000;
+    const usualRhr = [2, 3, 4, 5, 6].map(d => [now - d * D, 55]);
+    const short = Enrich.suggest([[now - 6 * H, now - 1 * H]], [...usualRhr, [now - 2 * H, 56]], now);
+    assert(short.feel === "tired" && short.sleepMin === 300 && /5h 0m sleep/.test(short.why), "5 h of sleep: tired");
+    const high = Enrich.suggest([[now - 9 * H, now - H]], [...usualRhr, [now - 2 * H, 62]], now);
+    assert(high.feel === "tired" && high.baseline === 55, "Resting HR 7 above usual: tired, even after a full night");
+    const good = Enrich.suggest([[now - 9 * H, now - H]], [...usualRhr, [now - 2 * H, 54]], now);
+    assert(good.feel === "fresh", "8 h sleep and normal resting HR: fresh");
+    assert(Enrich.suggest([], [], now).feel === null, "No watch data: no suggestion");
+})();
+
 // ─── Pace Formatting ─────────────────────────────────────────────────────────
 
 console.log("\n=== Pace Formatting Tests ===\n");
