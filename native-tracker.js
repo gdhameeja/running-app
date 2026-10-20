@@ -21,7 +21,10 @@ const NativeTracker = (() => {
         getState: () => call("getState").then(r => r.run || null),
         clear: () => call("clear"),
         speak: (text) => call("speak", { text }),
-        rate: (rating) => call("rate", { rating }),
+        // Backups and updates (sync.js): resolves with where the file went
+        saveFile: (name, text) => call("saveFile", { name, text }).then(r => r.location),
+        openUrl: (url) => call("openUrl", { url }),
+        appInfo: () => call("appInfo"),
         isIgnoringBatteryOptimizations: () => call("isIgnoringBatteryOptimizations").then(r => r.value),
         requestBatteryExemption: () => call("requestBatteryExemption"),
         onUpdate: (cb) => cap.addListener("RunTracker", "update", cb),
@@ -44,7 +47,11 @@ function startNativeRun() {
         // Meta rides along with every update from the service, so it carries the 100 m
         // splits only; attachNativeRun reloads the full track from IndexedDB.
         ghostRace: ghostRace ? Object.assign({}, ghostRace, { ghostTimeSeries: ghostRace.ghostSplits, ghostSplits: undefined, cue: undefined }) : null,
-        guided: guidedRun ? { courseId: guidedRun.courseId, level: guidedRun.level, sessionIndex: guidedRun.sessionIndex } : null,
+        guided: guidedRun ? {
+            courseId: guidedRun.courseId, level: guidedRun.level, sessionIndex: guidedRun.sessionIndex,
+            // A Tune-In run is planned on the spot, so it isn't in COURSES to look up again
+            session: guidedRun.courseId === TUNE_IN_ID ? guidedRun.session : undefined,
+        } : null,
     };
     return NativeTracker.start({
         runId: currentRunId,
@@ -52,7 +59,7 @@ function startNativeRun() {
         ghost: ghostRace ? { targetM: ghostRace.targetM, timeSeries: ghostRace.ghostTimeSeries } : null,
         guided: guidedRun ? guidedRun.segments.map(s => ({
             type: s.type, durationSec: Math.round(s.duration * 60), intensity: s.intensity,
-            label: s.label || null, say: s.say || null, target: s.target || null, surges: !!s.surges,
+            label: s.label || null, say: s.say || null, role: s.role || null, pace: s.pace || null,
         })) : null,
         meta: JSON.stringify(meta),
     });
@@ -116,7 +123,7 @@ function attachNativeRun(run) {
     }
     if (meta.guided) {
         const course = COURSES.find(c => c.id === meta.guided.courseId);
-        const sess = course && course.levels[meta.guided.level].sessions[meta.guided.sessionIndex];
+        const sess = meta.guided.session || (course && course.levels[meta.guided.level].sessions[meta.guided.sessionIndex]);
         if (sess) {
             guidedRun = {
                 courseId: meta.guided.courseId, level: meta.guided.level, sessionIndex: meta.guided.sessionIndex,
@@ -215,7 +222,6 @@ function applyNativeSnapshot(run) {
     estimatedDistance = run.estimatedDistance;
     timeSeriesData = run.timeSeries || [];
     trackData = run.track || [];
-    runRatings = run.ratings || [];
     const segs = run.pathSegments && run.pathSegments.length ? run.pathSegments : [[]];
     pathSegments = segs.slice(0, -1);
     currentSegment = segs[segs.length - 1];
@@ -297,6 +303,5 @@ function saveNativeSnapshot(run) {
         track: run.track || [],
         pathSegments: run.pathSegments || [],
         estimatedDistance: run.estimatedDistance,
-        ratings: run.ratings && run.ratings.length ? run.ratings : undefined,
     })));
 }

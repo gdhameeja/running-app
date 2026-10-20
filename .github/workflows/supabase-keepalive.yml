@@ -1,0 +1,29 @@
+# Free Supabase projects pause after a week with too little database activity.
+# The app writes a heartbeat on every sync; this covers weeks you don't open it.
+# Does nothing until the SUPABASE_URL and SUPABASE_KEY secrets exist
+# (docs/CLOUD_SYNC.md).
+name: Keep Supabase awake
+
+on:
+  schedule:
+    - cron: "17 6 */2 * *"
+  workflow_dispatch:
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write a heartbeat
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "No SUPABASE_URL / SUPABASE_KEY secrets: nothing to do"
+            exit 0
+          fi
+          # Legacy anon keys (JWTs) also go in Authorization; new sb_publishable_ keys must not
+          auth=()
+          case "$SUPABASE_KEY" in eyJ*) auth=(-H "Authorization: Bearer $SUPABASE_KEY") ;; esac
+          curl -fsS -X POST "$SUPABASE_URL/rest/v1/rpc/heartbeat" \
+            -H "apikey: $SUPABASE_KEY" "${auth[@]}" -H "Content-Type: application/json" -d '{}'

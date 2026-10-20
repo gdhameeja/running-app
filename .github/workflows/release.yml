@@ -1,0 +1,54 @@
+# Builds the APK on every push to main (or by hand from the Actions tab) and
+# publishes it as a GitHub release. The app checks for these and offers the
+# download, so no cable needed. Needs the DEBUG_KEYSTORE_B64 secret: see
+# docs/ANDROID.md ("Releases").
+name: Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The version is the commit count, so it needs the whole history
+          fetch-depth: 0
+
+      - name: Restore the signing key
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$DEBUG_KEYSTORE_B64" ]; then
+            echo "::error::Add the DEBUG_KEYSTORE_B64 secret first (docs/ANDROID.md). Without your key, the phone refuses the update."
+            exit 1
+          fi
+          mkdir -p .android-user
+          echo "$DEBUG_KEYSTORE_B64" | base64 -d > .android-user/debug.keystore
+
+      - name: Test and build
+        run: docker/build-apk.sh
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v1.$(git rev-list --count HEAD)"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "$tag is already released"
+            exit 0
+          fi
+          cp android/app/build/outputs/apk/debug/app-debug.apk "run-tracker-$tag.apk"
+          git log -1 --pretty=%B > notes.txt
+          gh release create "$tag" "run-tracker-$tag.apk" --target "$GITHUB_SHA" \
+            --title "Run Tracker $tag" --notes-file notes.txt

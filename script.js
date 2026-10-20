@@ -15,8 +15,6 @@ let pausedTime = 0;
 let gpsFilter = null;
 // Smoothed speed from the GPS filter, for the live pace readout: { mps, at }
 let currentSpeed = null;
-// Effort check-ins during a Tune-In run: [[moving ms, rating 1-5]]
-let runRatings = [];
 let lastFixTime = null;
 
 let db;
@@ -74,7 +72,9 @@ function initDB() {
     });
 }
 
+// Every local write stamps `updatedAt`, so cloud sync (sync.js) knows what changed.
 function saveRun(runData) {
+    runData.updatedAt = Date.now();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(["runs"], "readwrite");
         const store = tx.objectStore("runs");
@@ -85,6 +85,7 @@ function saveRun(runData) {
 }
 
 function updateRun(runData) {
+    runData.updatedAt = Date.now();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(["runs"], "readwrite");
         const store = tx.objectStore("runs");
@@ -130,6 +131,7 @@ function getLatestRun() {
 // ─── Course Progress DB ────────────────────────────────────────────────────────
 
 function saveCourseProgress(data) {
+    data.updatedAt = Date.now();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(["courseProgress"], "readwrite");
         const store = tx.objectStore("courseProgress");
@@ -145,7 +147,7 @@ function getActiveCourses() {
         const store = tx.objectStore("courseProgress");
         const index = store.index("status");
         const req = index.getAll("active");
-        req.onsuccess = () => resolve(req.result);
+        req.onsuccess = () => resolve(req.result.filter(p => COURSES.some(c => c.id === p.courseId)));
         req.onerror = (e) => reject(e.target.error);
     });
 }
@@ -210,9 +212,10 @@ function displayRunSummary(run) {
             const rep = RunAnalysis.guidedReport(run, run.guided, RunAnalysis.fiveKPace(runs, run.startTime));
             if (rep && rep.judged) lines.push(`Workout: ${rep.onTarget} of ${rep.judged} segments on target.`);
         }
-        if (run.ratings && run.ratings.length) {
-            const avg = run.ratings.reduce((sum, x) => sum + x[1], 0) / run.ratings.length;
-            lines.push(`You checked in ${run.ratings.length} times · average effort ${avg.toFixed(1)} of 5.`);
+        const tune = TuneInPlanner.result(run);
+        if (tune && tune.pace) {
+            const verdict = tune.ratio <= 1.01 ? "nailed it 🎯" : tune.ratio <= 1.04 ? "close" : "a tough one; next time adjusts";
+            lines.push(`Tune-In main set: ${formatPace(tune.pace)} /km vs target ${formatPace(tune.target)} · ${verdict}${tune.finished ? "" : " (ended early)"}.`);
         }
         summaryElement.querySelector(".summary-extra").innerHTML = lines.join("<br>");
     }).catch(() => {});
@@ -226,6 +229,7 @@ document.addEventListener("DOMContentLoaded", () => {
             initMap();
             initTabs();
             renderCourseGrid();
+            renderTuneInCard();
             return NativeTracker.available ? resumeNativeSession() : null;
         })
         .then(() => {
@@ -276,6 +280,7 @@ function initTabs() {
             }
             if (tab.dataset.tab === "courses") {
                 refreshActiveBanner();
+                renderTuneInCard();
             }
             if (tab.dataset.tab === "history") {
                 renderHistory();
@@ -314,7 +319,6 @@ document.getElementById("start").addEventListener("click", () => {
     trackData = [];
     lastGpsMotion = null;
     currentSpeed = null;
-    runRatings = [];
     lastTimeSeriesDistance = 0;
     lastTimeSeriesTime = 0;
 
@@ -348,6 +352,7 @@ document.getElementById("start").addEventListener("click", () => {
                 guided: guidedRun ? {
                     courseId: guidedRun.courseId, level: guidedRun.level, sessionIndex: guidedRun.sessionIndex,
                     title: guidedRun.session.title, segments: guidedRun.segments,
+                    tuneIn: guidedRun.session.tuneIn || undefined,
                 } : null,
             });
         })
@@ -488,8 +493,10 @@ function endRun(endTime) {
             runData.track = trackData;
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
-            if (runRatings.length) runData.ratings = runRatings;
-            return updateRun(runData).then(() => displayRunSummary(runData));
+            return updateRun(runData).then(() => {
+                displayRunSummary(runData);
+                CloudSync.soon();
+            });
         })
         .catch(error => console.error("Error updating run:", error));
 }
@@ -577,7 +584,6 @@ function autoSaveRun() {
             runData.track = trackData;
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
-            if (runRatings.length) runData.ratings = runRatings;
             store.put(runData);
         }
     };
@@ -1273,6 +1279,61 @@ function renderCourseGrid() {
     });
 }
 
+// ─── Tune-In run ───────────────────────────────────────────────────────────────
+// Not a course: one run, planned from your recent runs every time you open it
+// (TuneInPlanner in coach.js), then coached by pace.
+
+const TUNE_IN_ID = "tune-in";
+const FEELS = { tired: "😮‍💨 Tired", normal: "🙂 Normal", fresh: "⚡ Fresh" };
+let tuneInFeel = "normal";
+
+function tuneInDuration(sec) {
+    return sec >= 60 && sec % 60 === 0 ? `${sec / 60} min` : sec > 60 ? formatTime(sec) : `${sec} s`;
+}
+
+function renderTuneInCard() {
+    const el = document.getElementById("tunein-card");
+    getAllRuns().then(runs => {
+        const plan = TuneInPlanner.plan(runs, Date.now(), tuneInFeel);
+        const head = `<div class="cc-header"><span class="cc-icon">🎚️</span><span class="cc-name">Tune-In Run</span></div>`;
+        if (!plan.ready) {
+            el.innerHTML = `<div class="tunein-card">${head}
+                <p class="cc-desc">Learns your usual pace from your runs, then plans intervals that average just a little quicker: right outside your comfort zone.</p>
+                <div class="progress-bar"><div class="progress-fill" style="width:${Math.round(plan.have / plan.need * 100)}%"></div></div>
+                <p class="tunein-why">Learning: ${plan.have} of ${plan.need} runs (1.5 km or more, last 4 months). Any run counts.</p>
+            </div>`;
+            return;
+        }
+        const i = plan.info, sess = plan.session;
+        const pct = Math.round((i.usualPace / i.targetPace - 1) * 100);
+        let last = "";
+        if (i.last && i.last.pace) {
+            const how = !i.last.finished || i.last.ratio > 1.04 ? "a tough one, so today eases off a little"
+                : i.last.ratio <= 1.01 ? "you hit it, so today steps up" : "close, so today holds steady";
+            last = ` Last Tune-In: ${formatPace(i.last.pace)} vs ${formatPace(i.last.target)}, ${how}.`;
+        }
+        el.innerHTML = `<div class="tunein-card ready">${head}
+            <div class="tunein-target"><b>${formatPace(i.targetPace)}</b> /km<small>average for the ${i.mainMin}-min main set</small></div>
+            <p class="tunein-why">Your usual pace is ${formatPace(i.usualPace)} /km (last ${i.runsUsed} runs). Today: ${pct > 0 ? `${pct}% quicker` : "your usual average"}${i.capped ? ", held back by your 5K fitness" : ""}.${last}</p>
+            <div class="tunein-feel" role="group" aria-label="How do you feel today?">
+                ${Object.keys(FEELS).map(f => `<button class="feel-btn${f === tuneInFeel ? " active" : ""}" data-feel="${f}">${FEELS[f]}</button>`).join("")}
+            </div>
+            <p class="tunein-why"><b>${escapeHtml(sess.title.replace("Tune-In: ", ""))}</b>: ${i.about}. ${i.totalMin} min with warm-up and cool-down.</p>
+            <details class="tunein-plan"><summary>See the plan</summary>
+                <ol>${sess.segments.map(x => `<li><span class="sc-segment seg-${x.type}">${x.label}</span>
+                    <span>${tuneInDuration(Math.round(x.duration * 60))}</span>
+                    <span>${x.pace == null ? "walk or jog" : x.role === "warmup" || x.role === "recover" ? `easy, ~${formatPace(x.pace)}` : formatPace(x.pace)}</span></li>`).join("")}</ol>
+            </details>
+            <button class="up-next-start" id="tunein-start"><span class="material-icons">play_arrow</span> Start Tune-In run</button>
+        </div>`;
+        el.querySelectorAll(".feel-btn").forEach(b => b.addEventListener("click", () => {
+            tuneInFeel = b.dataset.feel;
+            renderTuneInCard();
+        }));
+        document.getElementById("tunein-start").addEventListener("click", () => startGuidedSession(sess, TUNE_IN_ID, null, null));
+    });
+}
+
 function openCourseDetail(courseId) {
     selectedCourseId = courseId;
     selectedLevel = "beginner";
@@ -1281,6 +1342,7 @@ function openCourseDetail(courseId) {
 
     document.getElementById("course-grid").style.display = "none";
     document.getElementById("active-course-banner").style.display = "none";
+    document.getElementById("tunein-card").style.display = "none";
     document.getElementById("course-detail").style.display = "block";
 
     document.getElementById("cd-icon").textContent = course.icon;
@@ -1463,6 +1525,8 @@ document.getElementById("back-to-courses").addEventListener("click", () => {
     document.getElementById("course-detail").style.display = "none";
     document.getElementById("course-grid").style.display = "grid";
     refreshActiveBanner();
+    document.getElementById("tunein-card").style.display = "";
+    renderTuneInCard();
 });
 
 document.querySelectorAll(".level-btn").forEach(btn => {
@@ -1560,11 +1624,11 @@ function segmentLabel(seg) {
     return seg.label || SEGMENT_NAMES[seg.type] || seg.type;
 }
 
-// ─── Tune-In coach (web runs; see coach.js) ────────────────────────────────────
+// ─── Tune-In pace coach (web runs; see coach.js) ───────────────────────────────
 
 function newCoach(segments) {
-    return new TuneInCoach(segments.map(s => ({
-        target: s.target, surges: !!s.surges, durationMs: Math.round(s.duration * 60) * 1000,
+    return new PaceCoach(segments.map(s => ({
+        role: s.role, pace: s.pace, durationMs: Math.round(s.duration * 60) * 1000,
     })));
 }
 
@@ -1574,59 +1638,45 @@ function runElapsedMs() {
 
 function coachSay(phrases) {
     phrases.forEach(p => speakText(p));
-    if (guidedRun && guidedRun.coach) guidedRun.coachState = guidedRun.coach.state(runElapsedMs());
+    if (guidedRun && guidedRun.coach) guidedRun.coachState = guidedRun.coach.state();
     renderCoach();
 }
 
-// You tapped a rating (1-5) on the run screen
-function rateEffort(rating) {
-    if (!guidedRun) return;
-    if (nativeRun) {
-        NativeTracker.rate(rating).catch(err => console.error("Rating failed:", err));
-    } else if (guidedRun.coach) {
-        runRatings = guidedRun.coach.ratings;
-        coachSay(guidedRun.coach.rate(rating, runElapsedMs()));
-    }
-    showToast(`Got it: ${rating} · ${EFFORT_LABELS[rating]}`, 1500);
-    const box = document.getElementById("gr-coach");
-    box.classList.add("rated");
-    setTimeout(() => box.classList.remove("rated"), 600);
-}
-
-// The coach box in the guided panel: what to aim for, and the 1-5 buttons
+// The coach box in the guided panel: the pace to aim for and yours right now
 function renderCoach() {
     const box = document.getElementById("gr-coach");
     if (!guidedRun) { box.style.display = "none"; return; }
-    if (guidedRun.coach) guidedRun.coachState = guidedRun.coach.state(runElapsedMs());
+    if (guidedRun.coach) guidedRun.coachState = guidedRun.coach.state();
     const st = guidedRun.coachState;
-    if (!st || !st.active) { box.style.display = "none"; return; }
+    if (!st || !st.active || st.target == null) { box.style.display = "none"; return; }
     box.style.display = "block";
-    box.classList.toggle("asking", !!st.asking);
-    box.classList.toggle("surge", st.mode === "surge");
-    box.classList.toggle("recover", st.mode === "recover");
-    document.getElementById("gr-coach-aim").textContent = st.instruction;
-    document.getElementById("gr-coach-ask").textContent = st.asking ? "How hard does it feel?" : "Tap any time to tell me how it feels";
-    box.querySelectorAll(".rate-btn").forEach(b => b.classList.toggle("last", Number(b.dataset.r) === st.lastRating));
+    box.className = st.status || "";
+    document.getElementById("gr-coach-target").textContent = formatPace(st.target);
+    document.getElementById("gr-coach-now").textContent = st.now ? formatPace(st.now) : "--:--";
+    const easy = st.role === "warmup" || st.role === "recover";
+    document.getElementById("gr-coach-status").textContent = !st.status ? "Finding your pace…"
+        : easy ? "Easy does it: no need to hit this exactly"
+        : st.status === "slow" ? "A little quicker" : st.status === "fast" ? "Ease back a touch" : "On pace ✓";
 }
 
-document.querySelectorAll("#gr-coach .rate-btn").forEach(btn =>
-    btn.addEventListener("click", () => rateEffort(Number(btn.dataset.r))));
-
 function startGuidedRun(courseId, levelKey, sessionIndex) {
+    const course = COURSES.find(c => c.id === courseId);
+    if (!course) return;
+    startGuidedSession(course.levels[levelKey].sessions[sessionIndex], courseId, levelKey, sessionIndex);
+}
+
+// A course session, or a Tune-In run (courseId "tune-in", planned on the spot, no course to enroll in)
+function startGuidedSession(sess, courseId, levelKey, sessionIndex) {
     if (document.getElementById("start").disabled) {
         alert("Stop your current run before starting a guided run.");
         return;
     }
 
-    const course = COURSES.find(c => c.id === courseId);
-    if (!course) return;
-    const sess = course.levels[levelKey].sessions[sessionIndex];
-
     guidedRun = {
         courseId, level: levelKey, sessionIndex, session: sess,
         segments: sess.segments,
-        // Tune-In sessions: the Android service runs its own coach and reports its state
-        coach: TuneInCoach.isCoached(sess.segments) && !NativeTracker.available ? newCoach(sess.segments) : null,
+        // Tune-In runs: the Android service runs its own coach and reports its state
+        coach: PaceCoach.isCoached(sess.segments) && !NativeTracker.available ? newCoach(sess.segments) : null,
         coachState: null,
         currentSegmentIndex: -1,
         segmentStartTime: null,
@@ -1637,7 +1687,7 @@ function startGuidedRun(courseId, levelKey, sessionIndex) {
 
     // Auto-enroll if not already in this course+level
     getCourseProgress(courseId).then(progress => {
-        if (!progress || progress.level !== levelKey) {
+        if (courseId !== TUNE_IN_ID && (!progress || progress.level !== levelKey)) {
             return saveCourseProgress({
                 progressId: `${courseId}-${levelKey}-${Date.now()}`,
                 courseId, level: levelKey,
@@ -1691,9 +1741,12 @@ function startSegment(index, scheduledStart = Date.now()) {
     const seg = guidedRun.segments[index];
     const durationSec = Math.round(seg.duration * 60);
 
+    // The pace coach announces its own segments, with their pace
+    const coached = guidedRun.coach ? guidedRun.coach.startSegment(index, runElapsedMs(), totalDistance) : [];
     // When catching up after throttled timers, skip segments that already ended
-    if (Date.now() < scheduledStart + durationSec * 1000) announceSegment(seg, durationSec);
-    if (guidedRun.coach) coachSay(guidedRun.coach.startSegment(index, runElapsedMs()));
+    if (Date.now() < scheduledStart + durationSec * 1000) {
+        if (coached.length) coachSay(coached); else announceSegment(seg, durationSec);
+    }
     updateGuidedRunUI();
     // updateGuidedRunUI may already have advanced past this segment
     if (!guidedRun || guidedRun.currentSegmentIndex !== index || guidedRun.completing) return;
@@ -1724,7 +1777,7 @@ function updateGuidedRunUI() {
     const elapsed = ((Date.now() - guidedRun.segmentStartTime) / 1000) - guidedRun.segmentPausedElapsed;
     const remaining = Math.max(0, durationSec - elapsed);
 
-    if (guidedRun.coach) coachSay(guidedRun.coach.tick(runElapsedMs()));
+    if (guidedRun.coach) coachSay(guidedRun.coach.tick(runElapsedMs(), totalDistance));
     renderGuidedPanel(remaining);
 
     // Voice countdowns
@@ -1762,10 +1815,10 @@ function renderGuidedPanel(remaining) {
     panel.className = `seg-${seg.type}`;
 
     document.getElementById("gr-segment-type").textContent = segmentLabel(seg).toUpperCase();
-    // Games and strides show what to do; coached segments show it in the coach box
+    // Games and strides show what to do; paced segments show it in the coach box
     const intensity = document.getElementById("gr-segment-intensity");
     intensity.textContent = (seg.type === "play" || seg.type === "stride") && seg.say ? seg.say : seg.intensity;
-    intensity.style.display = seg.target != null ? "none" : "";
+    intensity.style.display = seg.pace != null ? "none" : "";
     renderCoach();
 
     const remMins = Math.floor(remaining / 60);

@@ -41,8 +41,8 @@ data class TrackPoint(
 
 /**
  * One step of a guided session. `label`/`say` override the generic name and
- * announcement (Fun Run games); `target` (1-5) makes the Tune-In coach run
- * during it, with `surges` adding adaptive pick-ups.
+ * announcement (Fun Run games); Tune-In segments have a `role` (warmup, push,
+ * float, ...) and a target `pace` in s/km, and PaceCoach announces and coaches them.
  */
 data class GuidedSegment(
     val type: String,
@@ -50,8 +50,8 @@ data class GuidedSegment(
     val intensity: String,
     val label: String? = null,
     val say: String? = null,
-    val target: Int? = null,
-    val surges: Boolean = false,
+    val role: String? = null,
+    val pace: Double? = null,
 )
 
 /** The ghost to race: finish line in metres and its run (moving time vs distance). */
@@ -321,8 +321,8 @@ class RunEngine(val config: RunConfig, now: Long) {
         acc + s.durationSec * 1000L
     }
 
-    /** Tune-In sessions: asks how hard it feels and adapts (null for other runs). */
-    val coach: TuneInCoach? = if (TuneInCoach.isCoached(config.guided)) TuneInCoach(config.guided!!) else null
+    /** Tune-In runs: coaches each segment's target pace (null for other runs). */
+    val coach: PaceCoach? = if (PaceCoach.isCoached(config.guided)) PaceCoach(config.guided!!) else null
 
     // Ghost race result: null while racing, true/false once you cross the target.
     var ghostWon: Boolean? = null
@@ -466,21 +466,7 @@ class RunEngine(val config: RunConfig, now: Long) {
         return speech
     }
 
-    /** You rated your effort 1-5 on the run screen. Returns phrases to speak. */
-    fun rate(rating: Int, now: Long): List<String> {
-        val c = coach ?: return emptyList()
-        if (status == Status.FINISHED || guidedCompleted) return emptyList()
-        return c.rate(rating, elapsedMs(now))
-    }
-
-    /** Too easy (-1), just right (0) or too hard (+1), from the notification. */
-    fun rateRelative(delta: Int, now: Long): List<String> {
-        val c = coach ?: return emptyList()
-        if (status == Status.FINISHED || guidedCompleted) return emptyList()
-        return c.rateRelative(delta, elapsedMs(now))
-    }
-
-    /** Whether the coach is running right now (shows rating buttons). */
+    /** Whether the pace coach is running right now. */
     val coachActive get() = coach?.active == true && status != Status.FINISHED && !guidedCompleted
 
     /** Guided-run display state: segment index (-1 = get ready) and ms left in it. */
@@ -515,12 +501,13 @@ class RunEngine(val config: RunConfig, now: Long) {
             guidedIndex = index
             announcedWarnings.clear()
             if (index >= 0) {
-                speech += segmentAnnouncement(segments[index])
-                coach?.let { speech += it.startSegment(index, elapsed) }
+                // The pace coach announces its own segments, with their pace
+                val coached = coach?.startSegment(index, elapsed, totalDistance).orEmpty()
+                speech += coached.ifEmpty { listOf(segmentAnnouncement(segments[index])) }
             }
         }
         if (index < 0) return speech
-        coach?.let { speech += it.tick(elapsed) }
+        coach?.let { speech += it.tick(elapsed, totalDistance) }
 
         val seg = segments[index]
         val remaining = (guidedSegmentEnds[index + 1] - elapsed) / 1000.0

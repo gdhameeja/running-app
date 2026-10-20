@@ -771,125 +771,179 @@ const GpsFilter = require("./gps-filter.js");
     assert(p.speed < 0.3, `Standing still: speed ${p.speed.toFixed(2)} m/s`);
 })();
 
-// ─── Tune-In coach ──────────────────────────────────────────────────────────
+// ─── Tune-In: pace coach and planner ─────────────────────────────────────────
 
-console.log("\n=== Tune-In Coach Tests ===\n");
+console.log("\n=== Tune-In Tests ===\n");
 
-const { TuneInCoach, EFFORT_ANCHORS } = require("./coach.js");
+const { PaceCoach, TuneInPlanner, spokenPace } = require("./coach.js");
 
-(function testCoachChecksAndNudges() {
-    const MIN = 60000;
-    const c = new TuneInCoach([{ target: null, durationMs: 5 * MIN }, { target: 3, durationMs: 20 * MIN }]);
-    const said = [];
-    const run = (from, to) => { for (let t = from; t <= to; t += 500) said.push(...c.tick(t).map(p => [t, p])); };
-    assert(c.startSegment(0, 0).length === 0 && !c.active, "Uncoached segment: coach stays quiet");
-    run(0, 5 * MIN - 500);
-    assert(said.length === 0, "No check-ins outside coached segments");
-
-    c.startSegment(1, 5 * MIN);
-    run(5 * MIN, 5 * MIN + 89000);
-    assert(said.length === 0, "No check-in in the first 90 s");
-    run(5 * MIN + 90000, 5 * MIN + 90000);
-    assert(said.length === 1 && /1 to 5/.test(said[0][1]) && c.state(0).asking, "First check-in at 90 s");
-
-    let r = c.rate(4, 5 * MIN + 95000);
-    assert(/Ease off/.test(r[0]) && c.target() === 3, "4 when aiming for 3: ease off");
-    r = c.rate(4, 5 * MIN + 160000);
-    assert(c.target() === 2 && /gentler/.test(r[0]), "Too hard twice: target drops to 2");
-
-    r = c.rate(5, 6 * MIN);
-    assert(c.state(6 * MIN).mode === "recover" && /back right off/.test(r[0]), "5: back right off into recovery");
-    assert(c.tick(6 * MIN + 30000).length === 0, "Quiet during recovery");
-    r = c.tick(7 * MIN);
-    assert(/settle back in/.test(r[0]), "After a minute: settle back in");
-    assert(c.target() === 2, "The target never drops more than one step below the plan");
-
-    const d = new TuneInCoach([{ target: 3, durationMs: 30 * MIN }]);
-    d.startSegment(0, 0);
-    d.rate(2, 100000);
-    r = d.rate(1, 170000);
-    assert(d.target() === 4 && /flying/.test(r[0]), "Too easy twice: target rises to 4");
-    d.rate(1, 240000); d.rate(1, 300000);
-    assert(d.target() === 4, "Target never goes above 4");
-    assert(d.ratings.length === 4 && d.ratings[0][1] === 2, "Ratings are recorded");
-    r = d.rate(4, 360000);
-    assert(/Perfect|Spot on|Lovely/.test(r[0]), "On target: praise");
+(function testSpokenPace() {
+    assert(spokenPace(340) === "5 40 per kilometre" && spokenPace(305) === "5 oh 5 per kilometre" &&
+        spokenPace(360) === "6 minutes per kilometre", "Paces are spoken the way a runner says them");
 })();
 
-(function testCoachQuietEndAndTimeout() {
-    const c = new TuneInCoach([{ target: 3, durationMs: 100000 }]);
-    c.startSegment(0, 0);
-    let said = [];
-    for (let t = 0; t < 100000; t += 500) said.push(...c.tick(t));
-    assert(said.length === 0, "No check-in in a segment's last 30 s");
+// Drives a coach through one segment at a steady pace (s/km), ticking every 500 ms
+function runCoach(c, index, startT, startD, durationMs, paceSec) {
+    const said = c.startSegment(index, startT, startD).map(p => [startT, p]);
+    for (let t = startT; t < startT + durationMs; t += 500) {
+        said.push(...c.tick(t, startD + (t - startT) / paceSec).map(p => [t, p]));
+    }
+    return { said, endT: startT + durationMs, endD: startD + durationMs / paceSec };
+}
 
-    const d = new TuneInCoach([{ target: 2, durationMs: 600000 }]);
-    d.startSegment(0, 0);
-    said = [];
-    for (let t = 0; t <= 200000; t += 500) said.push(...d.tick(t));
-    assert(said.length === 2, `Unanswered check-ins time out and come back (${said.length} asks by 200 s)`);
+(function testCoachAnnouncesAndChecks() {
+    const c = new PaceCoach([
+        { role: "warmup", pace: 420, durationMs: 300000 },
+        { role: "cruise", pace: 360, durationMs: 120000 },
+        { role: "surge", pace: 300, durationMs: 20000 },
+    ]);
+    let r = runCoach(c, 0, 0, 0, 300000, 330);
+    assert(/Warm up easy, around 7 minutes per kilometre/.test(r.said[0][1]) && r.said.length === 1,
+        "Warm-up: announced with an easy pace, never nagged even when quick");
+
+    r = runCoach(c, 1, r.endT, r.endD, 120000, 360);
+    assert(/^Steady\. 6 minutes per kilometre, for 2 minutes/.test(r.said[0][1]), "Steady part announced with its pace");
+    assert(r.said.length === 2 && /On pace/.test(r.said[1][1]) && r.said[1][0] === 325000,
+        "On pace: one 'on pace' at 25 s, then quiet");
+
+    const slow = new PaceCoach([{ role: "cruise", pace: 360, durationMs: 180000 }]);
+    r = runCoach(slow, 0, 0, 0, 180000, 390);
+    const nags = r.said.slice(1).map(x => x[1]);
+    assert(nags.length === 4 && nags.every(m => /A little quicker\. Aim for 6 minutes/.test(m)),
+        `8% slow: 'a little quicker' at each check (${nags.length} checks in 3 min, none in the last 15 s)`);
+
+    const fast = new PaceCoach([{ role: "push", pace: 330, durationMs: 60000 }]);
+    r = runCoach(fast, 0, 0, 0, 60000, 290);
+    assert(r.said.length === 2 && /Strong!.*save a bit/.test(r.said[1][1]), "Push run far too fast: told to save a bit");
+
+    const surge = new PaceCoach([{ role: "surge", pace: 300, durationMs: 20000 }]);
+    r = runCoach(surge, 0, 0, 0, 20000, 400);
+    assert(r.said.length === 1 && /Surge! 20 seconds at 5 minutes per kilometre/.test(r.said[0][1]),
+        "Short surges are announced, never nagged (GPS can't judge 20 s)");
 })();
 
-(function testCoachSurges() {
-    const MIN = 60000;
-    const c = new TuneInCoach([{ target: 3, surges: true, durationMs: 20 * MIN }]);
-    c.startSegment(0, 0);
-    let said = [];
-    const run = (from, to) => { for (let t = from; t <= to; t += 500) said.push(...c.tick(t).map(p => [t, p])); };
-    run(0, 90000);
-    c.rate(3, 92000); // on target
-    said = [];
-    run(92000, 170000);
-    const surge = said.find(x => /Surge! 30 seconds/.test(x[1]));
-    assert(surge && surge[0] === 167000, "On target and 150 s+ in: a 30 s surge at the next check-in");
-    said = [];
-    run(170000, 200000);
-    assert(said.some(x => /How was that surge/.test(x[1])), "After the surge: asks how it was");
-    let r = c.rate(2, 200000);
-    assert(/45 seconds/.test(r[0]), "Surge felt easy: next one is 45 s");
-    c.rate(3, 300000);
-    said = [];
-    run(300000, 430000);
-    assert(said.some(x => /Surge! 45 seconds/.test(x[1])), "Next surge is 45 s");
-    r = c.rate(5, said.find(x => /How was that surge/.test(x[1]))[0] + 1000);
-    assert(/shorter/.test(r[0]) && c.state(0).mode === "recover", "Surge maxed you out: recover, next one shorter");
+(function testCoachEasesAfterMisses() {
+    const parts = [];
+    for (let i = 0; i < 4; i++) parts.push({ role: "push", pace: 330, durationMs: 60000 }, { role: "float", pace: 380, durationMs: 60000 });
+    parts.push({ role: "cooldown", pace: null, durationMs: 180000 });
+    const c = new PaceCoach(parts);
+    let r = runCoach(c, 0, 0, 0, 60000, 370);            // push 1: 12% slow, a miss
+    r = runCoach(c, 1, r.endT, r.endD, 60000, 380);      // float isn't judged
+    assert(c.scale === 1, "One missed push: no change yet");
+    r = runCoach(c, 2, r.endT, r.endD, 60000, 370);      // push 2: miss
+    const next = c.startSegment(3, r.endT, r.endD);
+    assert(/a little gentler/.test(next[0]) && c.eases === 1, "Two missed pushes: the rest of the run eases off");
+    assert(c.pace(4) === 345 && c.pace(5) === 395, "Eased paces are 4% gentler, to the nearest 5 s");
+    assert(c.pace(8) === null && /Cool down/.test(c.startSegment(8, 1e6, 3000)[0]), "The cool-down has no pace");
 
-    const easy = new TuneInCoach([{ target: 3, surges: false, durationMs: 20 * MIN }]);
-    easy.startSegment(0, 0);
-    easy.rate(3, 92000);
-    said = [];
-    for (let t = 92000; t < 15 * MIN; t += 500) said.push(...easy.tick(t));
-    assert(!said.some(p => /Surge/.test(p)), "No surges unless the segment asks for them");
+    const ok = new PaceCoach(parts);
+    r = runCoach(ok, 0, 0, 0, 60000, 370);
+    r = runCoach(ok, 1, r.endT, r.endD, 60000, 380);
+    r = runCoach(ok, 2, r.endT, r.endD, 60000, 335);     // back on target: the streak resets
+    r = runCoach(ok, 3, r.endT, r.endD, 60000, 380);
+    r = runCoach(ok, 4, r.endT, r.endD, 60000, 370);
+    ok.startSegment(5, r.endT, r.endD);
+    assert(ok.eases === 0, "Misses must be in a row");
+
+    const stopped = new PaceCoach([{ role: "cruise", pace: 360, durationMs: 120000 }]);
+    stopped.startSegment(0, 0, 50);
+    const quiet = [];
+    for (let t = 0; t < 120000; t += 500) quiet.push(...stopped.tick(t, 50));
+    assert(quiet.length === 0 && stopped.state().status === null, "Standing at a crossing: no pace, no nagging");
 })();
 
-(function testNewCourses() {
-    global.EFFORT_ANCHORS = EFFORT_ANCHORS;
+// Synthetic history: `n` runs of `km` at `pace` s/km, one every 2 days before `now`
+function fakeRuns(n, km, pace, now) {
+    return Array.from({ length: n }, (_, i) => {
+        const start = now - (i + 1) * 2 * 86400000;
+        const time = km * pace;
+        return {
+            runId: start, startTime: start, endTime: start + time * 1000, distance: km * 1000, time, pace,
+            timeSeries: [{ distance: 0, time: 0 }, { distance: km * 1000, time: time * 1000 }],
+        };
+    });
+}
+
+(function testPlannerLearns() {
+    const now = Date.UTC(2026, 9, 21);
+    let p = TuneInPlanner.plan(fakeRuns(4, 5, 360, now), now);
+    assert(!p.ready && p.have === 4 && p.need === 5, "Needs 5 recent runs before planning");
+
+    // Usually 6:00 /km; a 5K race at 5:00 a month ago sets the predicted 5K pace
+    const race = fakeRuns(1, 5, 300, now - 30 * 86400000);
+    const runs = [...fakeRuns(8, 5, 360, now), ...race];
+    p = TuneInPlanner.plan(runs, now);
+    const info = p.info;
+    assert(p.ready && Math.abs(info.usualPace - 360) < 0.5, `Usual pace learned: ${info.usualPace.toFixed(1)} s/km`);
+    assert(info.targetPace < 360 && info.targetPace > 342, `Target just outside comfort: ${info.targetPace.toFixed(1)} s/km (~3% quicker)`);
+    const segs = p.session.segments;
+    const main = segs.filter(s => !["warmup", "cooldown"].includes(s.role));
+    const mainS = main.reduce((a, s) => a + s.duration * 60, 0);
+    assert(Math.round(mainS) === info.mainMin * 60 && info.mainMin === 22, `Main set sized from your usual run: ${info.mainMin} min`);
+    const avg = mainS / main.reduce((a, s) => a + s.duration * 60 / s.pace, 0);
+    assert(Math.abs(avg - info.targetPace) < 0.01, "Interval paces average out to the target");
+    assert(new Set(main.map(s => s.pace)).size >= 3, "Reached with intervals, not one pace");
+    assert(main.every(s => s.pace >= info.p5 * 0.9 - 2.5), "No part faster than the cap from your 5K pace");
+    assert(segs[0].role === "warmup" && segs[segs.length - 1].role === "cooldown" && segs[segs.length - 1].pace == null,
+        "Warm-up first, unpaced cool-down last");
+    assert(p.session.tuneIn.mainStartMs === 305000, "Main set starts after the 5 s countdown and warm-up");
+
+    const tired = TuneInPlanner.plan(runs, now, "tired").info;
+    const fresh = TuneInPlanner.plan(runs, now, "fresh").info;
+    assert(tired.targetPace > info.targetPace && fresh.targetPace < info.targetPace, "Tired: gentler; fresh: a bit more");
+
+    // A Tune-In run, hit or missed, moves the step
+    const tuneRun = (paceSec, minutes) => {
+        const start = now - 3600000;
+        const tune = p.session.tuneIn;
+        const time = minutes * 60;
+        return {
+            runId: start, startTime: start, endTime: start + time * 1000, distance: time / paceSec * 1000, time, pace: paceSec,
+            timeSeries: [{ distance: 0, time: 0 }, { distance: time / paceSec * 1000, time: time * 1000 }],
+            guided: { title: p.session.title, segments: segs, tuneIn: tune },
+        };
+    };
+    const later = now + 1000;
+    const hit = TuneInPlanner.plan([...runs, tuneRun(info.targetPace - 3, info.totalMin)], later).info;
+    const missed = TuneInPlanner.plan([...runs, tuneRun(info.targetPace * 1.08, info.totalMin)], later).info;
+    const quit = TuneInPlanner.plan([...runs, tuneRun(info.targetPace, 15)], later).info;
+    assert(hit.baseStep > info.baseStep, `Hit it: next step grows (${(hit.baseStep * 100).toFixed(1)}%)`);
+    assert(missed.baseStep < info.baseStep && quit.baseStep < info.baseStep, "Missed it or stopped early: next step shrinks");
+    assert(hit.template !== info.template, "Each Tune-In run uses the next template");
+    const res = TuneInPlanner.result(tuneRun(info.targetPace * 1.08, info.totalMin));
+    assert(res.finished && Math.abs(res.ratio - 1.08) < 0.01, "Result compares the main set with its target");
+
+    // Someone whose every run is a race: never asked for more than race pace
+    const racer = TuneInPlanner.plan(fakeRuns(6, 5, 300, now), now).info;
+    assert(racer.capped && racer.targetPace >= racer.p5 - 0.01, `Capped at 5K pace: ${racer.targetPace.toFixed(1)} vs 5K ${racer.p5.toFixed(1)}`);
+})();
+
+(function testFunRunCourse() {
     const { COURSES } = new Function(require("fs").readFileSync("./courses.js", "utf8") + "; return { COURSES };")();
     const fun = COURSES.find(c => c.id === "fun-run");
-    const tune = COURSES.find(c => c.id === "tune-in");
-    assert(fun && tune, "Fun Run and Tune-In courses exist");
-    const all = [...Object.values(fun.levels), ...Object.values(tune.levels)].flatMap(l => l.sessions);
-    assert(all.every(s => s.segments.every(x => x.duration > 0 && x.intensity)), "Every segment has a duration and intensity");
-    const funSegs = Object.values(fun.levels).flatMap(l => l.sessions).flatMap(s => s.segments);
-    assert(funSegs.every(x => x.say && x.label), "Every Fun Run segment has its own words and label");
-    assert(!funSegs.some(x => /all-out|sprint|max/i.test(x.say + x.intensity) && !/not all out/i.test(x.say)), "Fun Run never asks for all-out efforts");
-    assert(funSegs.every(x => x.type !== "stride" && x.type !== "play" || x.duration * 60 <= 60), "Fun Run bursts are a minute or less");
+    assert(fun && !COURSES.some(c => c.id === "tune-in"), "Fun Run course exists; Tune-In is a run of its own now");
     const funSessions = Object.values(fun.levels).flatMap(l => l.sessions);
+    const funSegs = funSessions.flatMap(s => s.segments);
+    assert(funSegs.every(x => x.duration > 0 && x.intensity), "Every segment has a duration and intensity");
+    assert(funSegs.every(x => x.say && x.label), "Every Fun Run segment has its own words and label");
+    assert(funSessions.every(s => s.segments.every((x, i) => x.type !== "stride" ||
+        (x.duration * 60 <= 20 && s.segments[i + 1].type === "walk"))), "Speed bursts are 20 s or less, each followed by a walk");
+    // Longest easy cruise between two challenges
+    const gaps = funSessions.map(s => Math.max(...s.segments.filter(x => x.label === "Easy cruise").map(x => x.duration * 60)));
+    assert(Math.max(...gaps) <= 90, `Something happens at least every 90 s (longest easy stretch ${Math.max(...gaps)} s)`);
     assert(funSessions.every(s => s.segments[s.segments.length - 1].type === "cooldown" &&
         s.segments[s.segments.length - 2].label === "Victory!"), "Every Fun Run ends with a celebration, then an easy cool-down");
-    const lastHard = funSessions.map(s => {
-        const total = s.segments.reduce((a, x) => a + x.duration, 0);
+    const easyEnd = funSessions.map(s => {
+        const total = s.segments.reduce((a, x) => a + x.duration * 60, 0);
         let t = 0, last = 0;
-        s.segments.forEach(x => { if (x.type === "stride") last = t + x.duration; t += x.duration; });
-        return last / total;
+        s.segments.forEach(x => { t += x.duration * 60; if (x.type === "stride") last = t; });
+        return total - last;
     });
-    assert(Math.max(...lastHard) < 0.9, `Last stride ends before 90% of the session (latest ${(Math.max(...lastHard) * 100).toFixed(0)}%)`);
+    assert(Math.min(...easyEnd) >= 240, `At least 4 easy minutes after the last burst (shortest ${Math.round(Math.min(...easyEnd))} s)`);
     const titles = funSessions.slice(0, 6).map(s => s.title);
     assert(new Set(titles).size === 6, "The first two weeks use six different themes");
-    const tuneSessions = Object.values(tune.levels).flatMap(l => l.sessions);
-    assert(tuneSessions.every(s => s.segments.some(x => x.target != null) && s.segments[s.segments.length - 1].target == null),
-        "Tune-In sessions are coached, and the cool-down isn't");
-    assert(tuneSessions.some(s => s.segments.some(x => x.surges)), "Waves sessions have adaptive surges");
+    const said = funSegs.map(x => x.say).join(" ");
+    assert(/Naruto run/.test(said) && /Shoulder taps/.test(said) && /best pace/.test(said), "Naruto runs, shoulder taps and best-pace bursts are in");
 })();
 
 // ─── Pace Formatting ─────────────────────────────────────────────────────────

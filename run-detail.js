@@ -234,7 +234,16 @@ const RunDetail = (() => {
         moved: ["Kept moving", "slow"], stood: ["Stood still", "slow"], info: ["", "info"], skipped: ["Not reached", "info"],
     };
 
-    // Tune-In check-ins: when you rated your effort and what you said
+    // Where a Tune-In run's paces came from, and how the main set went
+    function tuneInNote(run) {
+        const t = run.guided.tuneIn;
+        const res = TuneInPlanner.result(run);
+        const how = res && res.pace ? ` You averaged <b>${formatPace(res.pace)}</b> /km in the main set.` : "";
+        return `<p class="gr-note">Planned from your last ${t.runsUsed} runs: usual pace ${formatPace(t.usualPace)} /km, ` +
+            `target ${formatPace(t.targetPace)} /km for the main set (${Math.round(t.step * 100)}% quicker).${how}</p>`;
+    }
+
+    // Old Tune-In check-ins: when you rated your effort and what you said
     function checkInsHtml(run) {
         if (!run.ratings || !run.ratings.length) return "";
         const avg = run.ratings.reduce((sum, x) => sum + x[1], 0) / run.ratings.length;
@@ -293,7 +302,7 @@ const RunDetail = (() => {
                         <td><span class="rd-verdict ${cls}">${text}</span></td></tr>`;
                 }).join("")}
             </table>
-            ${run.ratings && run.ratings.length ? "" : `<p class="gr-note">${p5
+            ${run.ratings && run.ratings.length ? "" : run.guided && run.guided.tuneIn ? tuneInNote(run) : `<p class="gr-note">${p5
                 ? `Targets come from your predicted 5K pace of ${formatPace(p5)} /km (your best recent run, scaled to 5K). Without heart rate, effort is judged by pace.`
                 : "Do a run of 1.5 km or more and pace targets will appear here."}</p>`}
             ${checkInsHtml(run)}`;

@@ -39,6 +39,7 @@
 
         <!-- ═══ HISTORY TAB ═══ -->
         <div class="tab-content" id="tab-history">
+            <div id="sync-panel"></div>
             <div id="history-list"></div>
         </div>
 
@@ -57,6 +58,9 @@
                 <button id="acb-view" class="btn-small">View Sessions</button>
                 <button id="acb-abandon" class="btn-small btn-danger">Abandon</button>
             </div>
+
+            <!-- Tune-In: one run, planned from your recent runs -->
+            <div id="tunein-card"></div>
 
             <!-- Course cards grid -->
             <div id="course-grid"></div>
@@ -136,17 +140,13 @@
                 <div class="gr-intensity" id="gr-segment-intensity"></div>
                 <div class="gr-countdown" id="gr-time-remaining">--:--</div>
                 <div class="gr-progress-bar"><div class="gr-progress-fill" id="gr-segment-progress"></div></div>
-                <!-- Tune-In coach: what to aim for and how it feels -->
+                <!-- Tune-In: the pace to aim for, and yours right now -->
                 <div id="gr-coach" style="display:none;">
-                    <div class="coach-aim" id="gr-coach-aim"></div>
-                    <div class="coach-ask" id="gr-coach-ask"></div>
-                    <div class="rate-row">
-                        <button class="rate-btn" data-r="1"><b>1</b><small>Too easy</small></button>
-                        <button class="rate-btn" data-r="2"><b>2</b><small>Easy</small></button>
-                        <button class="rate-btn" data-r="3"><b>3</b><small>Working</small></button>
-                        <button class="rate-btn" data-r="4"><b>4</b><small>Hard</small></button>
-                        <button class="rate-btn" data-r="5"><b>5</b><small>Maxed</small></button>
+                    <div class="coach-paces">
+                        <div><b id="gr-coach-target">--:--</b><small>aim /km</small></div>
+                        <div><b id="gr-coach-now">--:--</b><small>you /km, last 20 s</small></div>
                     </div>
+                    <div class="coach-status" id="gr-coach-status"></div>
                 </div>
                 <div class="gr-next" id="gr-next-segment"></div>
                 <div class="gr-count" id="gr-segment-count"></div>
@@ -256,6 +256,7 @@
     <script src="gps-filter.js"></script>
     <script src="native-tracker.js"></script>
     <script src="script.js"></script>
+    <script src="sync.js"></script>
     <script src="performance.js"></script>
     <script src="ghost-race.js"></script>
     <script src="run-detail.js"></script>

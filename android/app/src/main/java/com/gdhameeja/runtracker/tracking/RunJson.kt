@@ -23,8 +23,8 @@ object RunJson {
                     intensity = s.optString("intensity"),
                     label = s.optNullableString("label"),
                     say = s.optNullableString("say"),
-                    target = if (s.has("target") && !s.isNull("target")) s.getInt("target") else null,
-                    surges = s.optBoolean("surges", false),
+                    role = s.optNullableString("role"),
+                    pace = if (s.has("pace") && !s.isNull("pace")) s.getDouble("pace") else null,
                 )
             }
         },
@@ -74,14 +74,15 @@ object RunJson {
         }
         if (e.config.ghost != null) put("ghostWon", e.ghostWon ?: JSONObject.NULL)
         e.coach?.let { c ->
-            val instruction = if (e.coachActive) c.instruction(e.elapsedMs(now)) else null
+            val active = e.coachActive
             put("coach", JSONObject().apply {
-                put("active", instruction != null)
-                put("target", c.target() ?: JSONObject.NULL)
-                put("mode", c.mode.name.lowercase())
-                put("asking", c.isAsking)
-                put("lastRating", c.lastRating ?: JSONObject.NULL)
-                put("instruction", instruction ?: JSONObject.NULL)
+                put("active", active)
+                put("role", c.role ?: JSONObject.NULL)
+                put("target", (if (active) c.pace() else null) ?: JSONObject.NULL)
+                put("now", (if (active) c.now else null) ?: JSONObject.NULL)
+                put("status", (if (active) c.status else null) ?: JSONObject.NULL)
+                put("eases", c.eases)
+                put("instruction", (if (active) c.instruction() else null) ?: JSONObject.NULL)
             })
         }
         put("meta", e.config.meta ?: JSONObject.NULL)
@@ -102,7 +103,6 @@ object RunJson {
             }
         })
         put("track", JSONArray().apply { e.track.forEach { put(trackPoint(it)) } })
-        e.coach?.let { c -> put("ratings", JSONArray().apply { c.ratings.forEach { (t, r) -> put(JSONArray().put(t).put(r)) } }) }
     }
 
     /** `[timeMs, distanceM, lat, lng, speed|null, bearing|null]`, rounded to keep runs small (same as script.js). */

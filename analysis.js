@@ -402,7 +402,12 @@ const RunAnalysis = (() => {
 
     // What a segment asks for, as a pace range in multiples of 5K pace.
     function segmentTarget(seg) {
-        // Tune-In segments are coached by feel; Fun Run games and strides are never judged
+        // Tune-In segments carry their own pace; easy parts aren't judged
+        if (seg.role) {
+            if (seg.pace == null || ["warmup", "recover", "cooldown"].includes(seg.role)) return { kind: "feel", label: seg.label || "Easy" };
+            return { kind: "pace", label: seg.label, absolute: [seg.pace * 0.96, seg.pace * 1.04] };
+        }
+        // Old Tune-In runs were coached by feel; Fun Run games and strides are never judged
         if (seg.target != null) return { kind: "feel", label: `Effort ${seg.target} of 5, by feel` };
         if (seg.type === "play" || seg.type === "stride") return { kind: "feel", label: seg.label || "Play" };
         const t = (seg.intensity || "").toLowerCase();

@@ -2,13 +2,16 @@ package com.gdhameeja.runtracker.tracking
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.getcapacitor.JSObject
@@ -20,6 +23,7 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
 import org.json.JSONObject
+import java.io.File
 
 // JS bridge to RunTrackerService (see native-tracker.js for the web side).
 @CapacitorPlugin(
@@ -139,13 +143,59 @@ class RunTrackerPlugin : Plugin() {
         }
     }
 
-    /** Effort rating (1-5) for the Tune-In coach. */
+    // ─── Backups and updates (sync.js) ───────────────────────────────────────
+
+    /** Saves `text` as `name` in Downloads; resolves with `{ location }` to show the user. */
     @PluginMethod
-    fun rate(call: PluginCall) {
-        main.post {
-            RunTrackerService.instance?.rate(call.getInt("rating") ?: 3)
-            call.resolve()
+    fun saveFile(call: PluginCall) {
+        val name = call.getString("name") ?: return call.reject("Missing name")
+        val text = call.getString("text") ?: return call.reject("Missing text")
+        Thread {
+            try {
+                call.resolve(JSObject().put("location", writeDownload(name, text.toByteArray())))
+            } catch (e: Exception) {
+                call.reject("Could not save the file: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun writeDownload(name: String, bytes: ByteArray): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "application/json")
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("No Downloads folder")
+            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw IllegalStateException("Could not open $uri")
+            return "Downloads/$name"
         }
+        // Before Android 10 public Downloads needs a storage permission; the app's own folder doesn't
+        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+        File(dir, name).writeBytes(bytes)
+        return File(dir, name).absolutePath
+    }
+
+    /** Opens a link in the browser (the APK download for an update). */
+    @PluginMethod
+    fun openUrl(call: PluginCall) {
+        val url = call.getString("url") ?: return call.reject("Missing url")
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            call.resolve()
+        } catch (e: Exception) {
+            call.reject("No app can open $url")
+        }
+    }
+
+    /** Resolves with `{ versionCode, versionName }` of the installed app. */
+    @PluginMethod
+    fun appInfo(call: PluginCall) {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        @Suppress("DEPRECATION")
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
+        call.resolve(JSObject().put("versionCode", code).put("versionName", info.versionName ?: ""))
     }
 
     @PluginMethod

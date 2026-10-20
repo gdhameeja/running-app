@@ -9,6 +9,11 @@ docker volume create runtracker-gradle-cache > /dev/null
 # New volumes are root-owned; hand the Gradle cache to the calling user
 docker run --rm -v runtracker-gradle-cache:/gradle runtracker-android-build chown "$(id -u):$(id -g)" /gradle
 
+# Version from the commit count: a later commit is always a higher versionCode,
+# and a GitHub release and a local build of the same commit agree.
+VERSION_CODE=$(git rev-list --count HEAD)
+VERSION_NAME="1.$VERSION_CODE"
+
 # Keep the debug signing key in the project (.android-user/, git-ignored). Without
 # it every build signs with a fresh key and Android refuses to install the update
 # over the previous one, forcing an uninstall that wipes your runs.
@@ -21,6 +26,6 @@ docker run --rm -u "$(id -u):$(id -g)" \
     npm ci --no-audit --no-fund
     npm test
     npm run sync
-    cd android && ./gradlew --no-daemon testDebugUnitTest assembleDebug $*
+    cd android && ./gradlew --no-daemon -PversionCode=$VERSION_CODE -PversionName=$VERSION_NAME testDebugUnitTest assembleDebug $*
   "
-echo "APK: android/app/build/outputs/apk/debug/app-debug.apk"
+echo "APK: android/app/build/outputs/apk/debug/app-debug.apk (version $VERSION_NAME)"

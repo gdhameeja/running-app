@@ -10,9 +10,10 @@ foreground service that owns the run so it keeps going with the screen locked.
 | Web UI | `index.html`, `script.js`, `courses.js`, `performance.js` | Screens, map, charts, IndexedDB storage. Unchanged in the browser. |
 | Bridge | `native-tracker.js` | In the app, starts/pauses/stops the service, mirrors its state into the UI, saves finished runs. |
 | Plugin | `android/.../tracking/RunTrackerPlugin.kt` | Capacitor plugin `RunTracker` (start, pause, resume, stop, getState, clear, speak, rate). |
-| Service | `android/.../tracking/RunTrackerService.kt` | Foreground service: GPS, wake lock, notification (Pause/Finish, or Too easy/Just right/Too hard during Tune-In check-ins), TTS, snapshot to disk every 10 s. |
+| Service | `android/.../tracking/RunTrackerService.kt` | Foreground service: GPS, wake lock, notification (Pause/Finish; during a Tune-In run, the pace to aim for and yours), TTS, snapshot to disk every 10 s. |
 | GPS filter | `gps-filter.js`, `GpsFilter` in `RunEngine.kt` | Constant-velocity Kalman filter in metres, using the receiver's Doppler speed and bearing; keeps jitter out of distance. |
-| Tune-In coach | `coach.js`, `TuneInCoach.kt` | Asks for effort ratings (1-5, talk-test anchored) during coached segments and adapts targets and surges. |
+| Tune-In | `coach.js`, `PaceCoach.kt` | Plans a run from your recent runs (`TuneInPlanner`, web only) and coaches its paces live (`PaceCoach`, in both). |
+| Backup and updates | `sync.js` | Supabase sync, JSON export/import, update check against GitHub Releases. See [CLOUD_SYNC.md](CLOUD_SYNC.md). |
 | AR sensors | `android/.../tracking/ArSensors.kt` | Rotation-vector stream, magnetic declination and rear-camera optics for the AR ghost view. |
 | Engine | `android/.../tracking/RunEngine.kt` | Pure Kotlin port of the tracking logic (filtering, gaps, splits, guided segments, ghost race). Unit tested. |
 
@@ -29,6 +30,25 @@ Needs only Docker:
 This runs the JS tests and Kotlin unit tests, then writes
 `android/app/build/outputs/apk/debug/app-debug.apk`. Install it with
 `adb install -r app-debug.apk`, or copy it to the phone and open it.
+The version is `1.<commit count>`, so a build of a later commit always
+installs over an earlier one.
+
+## Releases (no cable)
+
+Every push to `main` builds the APK on GitHub (`.github/workflows/release.yml`)
+and publishes it as a release (`v1.<commit count>`). You can also run it from
+the **Actions** tab on any branch. The app checks for a newer release when it
+opens (at most every 6 hours) and offers **Download** under **History → Cloud
+backup**. Open the downloaded APK to install. The first time, Android asks you
+to allow installs from your browser.
+
+The release must be signed with the same key as the app on your phone, or
+Android refuses the update (and uninstalling wipes your runs). One-time setup:
+
+    base64 -w0 .android-user/debug.keystore
+
+Copy the output into a repo secret named `DEBUG_KEYSTORE_B64` (**GitHub →
+Settings → Secrets and variables → Actions → New repository secret**).
 
 After changing web files, rebuild; `npm run sync` copies them into the Android project.
 
@@ -72,15 +92,25 @@ Runs also store what they were doing, for the run detail page:
   to replay a run, or `{ type: "pace", targetM, timeMs }` for a target time).
   `buildGhost` in `ghost-race.js` turns a spec into the ghost's series.
 - `guided`: the course session (title and segments) for the workout report.
-- `ratings`: Tune-In check-ins, `[[movingMs, rating 1-5], ...]`.
+- `ratings`: effort check-ins from the old Tune-In course, `[[movingMs, rating 1-5], ...]`.
+- `updatedAt`: when the record last changed on this phone, for cloud sync.
 
 ## Courses with scripted and coached segments
 
 Guided segments can carry `label` and `say` (their own name and spoken words;
-Fun Run games) and `target` (1-5) plus `surges` (Tune-In). Both the web runner
-in `script.js` and `RunEngine.tickGuided` honour them; `coach.js` and
-`TuneInCoach.kt` must stay in step (`tests.js` and `TuneInCoachTest.kt` test
-the same cases).
+Fun Run games and bursts) and `role` plus `pace` (s/km; Tune-In). Both the web
+runner in `script.js` and `RunEngine.tickGuided` honour them; for paced
+segments the coach speaks the announcement. `PaceCoach` in `coach.js` and
+`PaceCoach.kt` must stay in step (`tests.js` and `PaceCoachTest.kt` test the
+same cases).
+
+**Tune-In** is not a course: the card on the Courses tab plans a run each
+time from your last 10 runs (it needs 5). The main set averages a few percent
+quicker than your usual pace, reached with pushes, surges, floats and
+recoveries, and capped by your predicted 5K pace. The step grows after a
+Tune-In run you hit and shrinks after one you missed (`run.guided.tuneIn`
+keeps the plan). During the run, two missed parts in a row make the rest 4%
+gentler.
 
 ## Ghost races, routes and run details
 
