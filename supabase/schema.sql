@@ -48,7 +48,10 @@ drop policy if exists "own course progress" on public.course_progress;
 create policy "own course progress" on public.course_progress for all to authenticated
     using (user_id = auth.uid()) with check (user_id = auth.uid());
 
+-- Signed-in users only (works with "Automatically expose new tables" off);
+-- the policies above still limit them to their own rows. Nothing is ever deleted.
 revoke all on public.runs, public.course_progress from anon;
+grant select, insert, update on public.runs, public.course_progress to authenticated;
 
 -- Keep-alive: free projects pause after a week with too little activity. The app
 -- calls this on every sync, and .github/workflows/supabase-keepalive.yml every 2 days.

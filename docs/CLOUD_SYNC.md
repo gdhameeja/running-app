@@ -8,6 +8,8 @@ everything back as soon as you sign in. Code: `sync.js`.
 ## Setup (about 5 minutes, once)
 
 1. Create a free account at [supabase.com](https://supabase.com) and a new project.
+   When asked: **Enable Data API** on (the app uses it), **Automatically expose
+   new tables** off (the schema grants access itself), **automatic RLS** either way.
 2. **SQL Editor → New query**: paste all of [`supabase/schema.sql`](../supabase/schema.sql) and **Run**.
 3. **Authentication → Sign In / Providers → Email**: either leave "Confirm email"
    on (you'll click a link in an email once) or turn it off.
