@@ -18,8 +18,17 @@ VERSION_NAME="1.$VERSION_CODE"
 # it every build signs with a fresh key and Android refuses to install the update
 # over the previous one, forcing an uninstall that wipes your runs.
 mkdir -p .android-user
+
+# The container runs as you, but its /etc/passwd only knows uid 1000; the
+# Capacitor CLI looks up the current user and crashes on any other uid
+# (GitHub's runner is 1001). Hand it a passwd file that includes you.
+docker run --rm runtracker-android-build cat /etc/passwd > .android-user/passwd
+grep -q "^[^:]*:[^:]*:$(id -u):" .android-user/passwd ||
+  echo "builder:x:$(id -u):$(id -g)::/tmp/home:/bin/bash" >> .android-user/passwd
+
 docker run --rm -u "$(id -u):$(id -g)" \
   -e HOME=/tmp/home -e GRADLE_USER_HOME=/gradle -e ANDROID_USER_HOME=/app/.android-user \
+  -v "$PWD/.android-user/passwd":/etc/passwd:ro \
   -v "$PWD":/app -v runtracker-gradle-cache:/gradle \
   runtracker-android-build bash -c "
     set -e
