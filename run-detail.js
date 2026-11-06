@@ -41,7 +41,33 @@ const RunDetail = (() => {
         if (!fromHistory && history.state && history.state.runDetail) history.back();
     }
 
+    // A gym session: what you lifted, no map
+    function renderStrength(run, runs) {
+        el.innerHTML = `
+            <div class="rd-bar">
+                <button class="rd-back" aria-label="Back"><span class="material-icons">arrow_back</span></button>
+                <div class="rd-title">${escapeHtml(run.title || "Gym")} · ${formatRunDate(run.startTime)}</div>
+            </div>
+            <div class="rd-body">
+                <div class="rd-stats">
+                    <div><span>${formatDuration(run.time)}</span><small>time</small></div>
+                    ${StrengthPlanner.volume(run) > 0 ? `<div><span>${Math.round(StrengthPlanner.volume(run)).toLocaleString()}</span><small>kg lifted</small></div>` : ""}
+                    <div><span>${StrengthPlanner.totalReps(run).toLocaleString()}</span><small>reps</small></div>
+                </div>
+                ${rpeHtml(run)}
+                ${strengthDetailHtml(run)}
+                <h3>Fix this session</h3>
+                <div id="rd-edit"><button class="btn-small btn-danger" id="rd-delete"><span class="material-icons">delete</span> Delete session</button></div>
+            </div>`;
+        el.style.display = "flex";
+        document.body.classList.add("rd-open");
+        bindRpe(el);
+        el.querySelector(".rd-back").addEventListener("click", () => close(false));
+        el.querySelector("#rd-delete").addEventListener("click", () => removeRun(run, runs));
+    }
+
     function render(run, runs) {
+        if (run.activity === "strength") return renderStrength(run, runs);
         const series = RunAnalysis.seriesForRun(run);
         const hasTrack = !!(run.track && run.track.length > 1);
         const stops = hasTrack ? RunAnalysis.findStops(run.track) : [];
@@ -62,7 +88,7 @@ const RunDetail = (() => {
                 </div>
                 <div id="rd-tags"></div>
                 <div id="rd-conditions">${conditionsHtml(run)}</div>
-                ${run.distance >= 300 ? `<button class="rd-race"><span class="material-icons">directions_run</span> Race this run</button>` : ""}
+                ${run.distance >= 300 && !run.activity ? `<button class="rd-race"><span class="material-icons">directions_run</span> Race this run</button>` : ""}
                 <div id="rd-map"></div>
                 <div class="rd-legend" id="rd-legend"></div>
                 <div class="rd-replay" id="rd-replay" style="display:none;">
@@ -76,6 +102,17 @@ const RunDetail = (() => {
                 <div id="rd-splits"></div>
                 ${hasTrack ? `<h3>Stops</h3><div id="rd-stops"></div>` : ""}
                 ${hasTrack ? "" : `<p class="gr-note">Runs recorded before this version only have 100 m splits: no pace colours, stops or smooth replay.</p>`}
+                <h3>Fix this run</h3>
+                <div id="rd-edit">
+                    ${hasTrack ? `<button class="btn-small" id="rd-trim"><span class="material-icons">content_cut</span> Trim the end</button>
+                    <div id="rd-trim-box" style="display:none;">
+                        <p class="gr-note">Forgot to stop, or got a lift home? Drag to where the run really ended. Everything after it is removed for good.</p>
+                        <input type="range" id="rd-trim-at" min="0" max="1000" value="1000">
+                        <div class="rd-readout" id="rd-trim-readout"></div>
+                        <div class="sp-row"><button class="btn-small" id="rd-trim-save" disabled>Save</button><button class="btn-small" id="rd-trim-cancel">Cancel</button></div>
+                    </div>` : ""}
+                    <button class="btn-small btn-danger" id="rd-delete"><span class="material-icons">delete</span> Delete run</button>
+                </div>
             </div>`;
         el.style.display = "flex";
         document.body.classList.add("rd-open");
@@ -84,23 +121,109 @@ const RunDetail = (() => {
         const raceBtn = el.querySelector(".rd-race");
         if (raceBtn) raceBtn.addEventListener("click", () => raceRun(run));
 
+        el.querySelector("#rd-delete").addEventListener("click", () => removeRun(run, runs));
         renderTags(run, runs);
         renderMap(run, stops);
         renderSplits(splits);
         if (hasTrack) renderStops(stops);
         if (run.guided) renderGuided(run, runs);
         setupReplay(run, series);
+        if (hasTrack) setupTrim(run, series, runs);
     }
 
-    // Race this run's ghost. Closing pops history, so start once that's done
-    // or the run screen's history entry would be popped instead.
-    function raceRun(run) {
-        const spec = { type: "run", runId: run.runId, targetM: Math.floor(run.distance / 10) * 10, label: `Run of ${shortDate(run.startTime)}` };
-        const go = () => startGhostRaceMode(spec);
+    // Closing pops history, so anything that touches the run screen waits until
+    // that's done, or the run screen's history entry would be popped instead.
+    function closeThen(go) {
         const popping = history.state && history.state.runDetail;
         if (popping) window.addEventListener("popstate", () => setTimeout(go, 0), { once: true });
         close(false);
         if (!popping) go();
+    }
+
+    // Race this run's ghost.
+    function raceRun(run) {
+        const spec = { type: "run", runId: run.runId, targetM: Math.floor(run.distance / 10) * 10, label: `Run of ${shortDate(run.startTime)}` };
+        closeThen(() => startGhostRaceMode(spec));
+    }
+
+    // ─── Fixing a bad run ────────────────────────────────────────────────────
+
+    function refreshLists() {
+        routeSignatureCache.delete(current && current.runId);
+        renderHomeRecent();
+        if (document.getElementById("tab-history").classList.contains("active")) renderHistory();
+        CloudSync.soon();
+    }
+
+    function removeRun(run, runs) {
+        const what = run.activity === "strength" ? "gym session" : `${(run.distance / 1000).toFixed(2)} km ${run.activity === "walk" ? "walk" : "run"}`;
+        if (!confirm(`Delete this ${what}? It goes from your history, PBs and plans, on all your phones. This can't be undone.`)) return;
+        // A route's name lives on its oldest run: hand it on
+        const named = run.routeName && routeFor(findRoutes(runs), run.runId);
+        const heir = named && named.route.ranked.entries.map(e => e.run).filter(r => r.runId !== run.runId)
+            .sort((a, b) => a.startTime - b.startTime)[0];
+        Promise.resolve(heir ? patchRun(heir.runId, { routeName: run.routeName }) : null)
+            .then(() => deleteRun(run.runId))
+            .then(() => closeThen(() => {
+                if (summaryRunId === run.runId) closeRunScreen();
+                refreshLists();
+                showToast("Run deleted.", 2000);
+            }))
+            .catch(err => alert("Couldn't delete that run: " + (err && err.message || err)));
+    }
+
+    function setupTrim(run, series, runs) {
+        const box = document.getElementById("rd-trim-box");
+        const slider = document.getElementById("rd-trim-at");
+        const readout = document.getElementById("rd-trim-readout");
+        const save = document.getElementById("rd-trim-save");
+        const total = run.track[run.track.length - 1][0];
+        let marker = null, keepMs = total;
+        const update = () => {
+            keepMs = Math.round(slider.value / 1000 * total);
+            const d = RunAnalysis.distanceAtTime(series, keepMs);
+            readout.textContent = `Keep ${(d / 1000).toFixed(2)} km · ${formatDuration(keepMs / 1000)}`;
+            save.disabled = !RunAnalysis.trimRun(run, keepMs);
+            const p = RunAnalysis.pointAtDistance(series, d);
+            if (p && marker) marker.setLatLng(p);
+        };
+        const hide = () => {
+            box.style.display = "none";
+            document.getElementById("rd-trim").style.display = "";
+            if (marker) { marker.remove(); marker = null; }
+        };
+        document.getElementById("rd-trim").addEventListener("click", e => {
+            e.currentTarget.style.display = "none";
+            box.style.display = "";
+            slider.value = 1000;
+            if (map) marker = L.circleMarker([run.track[0][2], run.track[0][3]], { radius: 9, color: "#fff", weight: 3, fillColor: "#212121", fillOpacity: 1 }).addTo(map);
+            update();
+        });
+        slider.addEventListener("input", update);
+        document.getElementById("rd-trim-cancel").addEventListener("click", hide);
+        save.addEventListener("click", () => {
+            const preview = RunAnalysis.trimRun(run, keepMs);
+            if (!preview) return;
+            const cut = ((run.distance - preview.distance) / 1000).toFixed(2);
+            if (!confirm(`Remove the last ${cut} km of this run? This can't be undone.`)) return;
+            save.disabled = true;
+            // From the stored run: an effort rating or note may have changed since this page opened
+            let trimmed = null;
+            getRunById(run.runId).then(fresh => {
+                trimmed = fresh && RunAnalysis.trimRun(fresh, keepMs);
+                if (!trimmed) throw new Error("that run has changed");
+                return updateRun(trimmed);
+            }).then(() => {
+                refreshLists();
+                Enrich.afterRun();
+                // Redraw in place: the history entry stays as it is
+                stopReplay();
+                if (map) { map.remove(); map = null; }
+                current = trimmed;
+                render(trimmed, runs.map(r => r.runId === trimmed.runId ? trimmed : r));
+                showToast("Run trimmed.", 2000);
+            }).catch(err => alert("Couldn't save that: " + (err && err.message || err)));
+        });
     }
 
     // ─── Header tags: ghost, guided session, route rank ─────────────────────
@@ -439,7 +562,7 @@ const RunDetail = (() => {
     function bindRpe(container) {
         container.querySelectorAll(".rpe-box").forEach(box => {
             const id = Number(box.dataset.run);
-            const save = (patch) => getRunById(id).then(r => r && updateRun(Object.assign(r, patch)));
+            const save = (patch) => patchRun(id, patch);
             box.querySelectorAll(".rpe-btn").forEach(b => b.addEventListener("click", () => {
                 box.querySelectorAll(".rpe-btn").forEach(x => x.classList.toggle("on", x === b));
                 save({ rpe: Number(b.dataset.rpe) }).then(() => showToast("Saved. Thanks!", 1200));

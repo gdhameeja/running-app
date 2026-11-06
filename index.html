@@ -4,12 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Run Tracker</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Bundled, not from a CDN: the app has to start with no signal -->
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="vendor/material-icons/material-icons.css">
     <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap">
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+    <script src="vendor/leaflet/leaflet.js"></script>
+    <script src="vendor/chart.umd.js"></script>
 </head>
 <body>
     <div class="container">
@@ -35,6 +35,10 @@
             <p id="home-gps" class="home-gps">Finding GPS…</p>
             <div id="home-feel"></div>
             <button id="start" class="start-btn"><span class="material-icons">play_arrow</span> Start run</button>
+            <div class="home-more">
+                <button id="start-walk"><span class="material-icons">directions_walk</span> <span class="btn-label">Walk</span></button>
+                <button id="open-gym"><span class="material-icons">fitness_center</span> <span class="btn-label">Gym</span></button>
+            </div>
             <div id="home-recent"></div>
         </div>
 
@@ -117,8 +121,11 @@
                         <span id="vo2max-value" class="vo2max-number"></span>
                         <span class="vo2max-unit">ml/kg/min</span>
                     </div>
-                    <p class="vo2max-note">Estimated from Cooper formula on ~12 min runs</p>
+                    <p class="vo2max-note">From your predicted 5K: your best recent run of 1.5 km or more</p>
                 </div>
+
+                <div id="strength-stats"></div>
+                <div id="walk-stats"></div>
 
                 <h3>Course Progress</h3>
                 <div id="course-progress-stats"></div>
@@ -249,11 +256,15 @@
             </button>
         </div>
     </div>
+    <div id="gym-screen" style="display:none;"></div>
     <div id="toast" style="display:none;"></div>
 
     <script src="coach.js"></script>
     <script src="courses.js"></script>
     <script src="analysis.js"></script>
+    <script src="run-core.js"></script>
+    <script src="run-store.js"></script>
+    <script src="strength-plan.js"></script>
     <script src="gps-filter.js"></script>
     <script src="native-tracker.js"></script>
     <script src="script.js"></script>
@@ -261,6 +272,7 @@
     <script src="enrich.js"></script>
     <script src="performance.js"></script>
     <script src="ghost-race.js"></script>
+    <script src="strength.js"></script>
     <script src="run-detail.js"></script>
     <script src="ar-math.js"></script>
     <script src="ar-ghost.js"></script>

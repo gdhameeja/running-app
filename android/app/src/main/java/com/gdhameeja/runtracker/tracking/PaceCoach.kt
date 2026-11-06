@@ -194,6 +194,26 @@ class PaceCoach(private val segments: List<GuidedSegment>) {
         return listOfNotNull(msg)
     }
 
+    /** Where the coach had got to, for carrying on with a run the app lost. */
+    data class State(
+        val scale: Double, val eases: Int, val misses: Int, val seg: Int, val segStart: Long,
+        val segStartDist: Double, val nextCheckAt: Long, val results: List<Result>,
+    )
+
+    fun state() = State(scale, eases, misses, seg, segStart, segStartDist, nextCheckAt, results.toList())
+
+    fun restore(s: State) {
+        scale = s.scale
+        eases = s.eases
+        misses = s.misses
+        seg = s.seg
+        segStart = s.segStart
+        segStartDist = s.segStartDist
+        nextCheckAt = s.nextCheckAt
+        results.clear()
+        results.addAll(s.results)
+    }
+
     /** What to do right now, for the run screen and the notification. */
     fun instruction(): String? {
         val s = segments.getOrNull(seg) ?: return null

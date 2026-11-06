@@ -83,10 +83,11 @@ class GpsFilter {
     // Starts over at this fix (first fix, after a pause or a GPS gap).
     reset(lat, lng, accuracy, timeMs, speed = null, bearing = null) {
         this.origin = { lat, lng, cosLat: Math.cos(lat * Math.PI / 180) };
-        const v = GpsFilter.velocity(speed, bearing) || [0, 0];
+        const known = GpsFilter.velocity(speed, bearing);
+        const v = known || [0, 0];
         const pv = accuracy * accuracy;
-        // Unknown velocity starts with a wide (5 m/s) uncertainty
-        const vv = speed == null ? 25 : GpsFilter.VELOCITY_SIGMA ** 2;
+        // Unknown velocity (no speed, or moving with no bearing) starts with a wide (5 m/s) uncertainty
+        const vv = known ? GpsFilter.VELOCITY_SIGMA ** 2 : 25;
         this.x = [[0, v[0]], [0, v[1]]];
         this.P = [[pv, 0, 0, vv], [pv, 0, 0, vv]];
         this.time = timeMs;
@@ -112,4 +113,46 @@ class GpsFilter {
     }
 }
 
-if (typeof module !== "undefined") module.exports = GpsFilter;
+// Says when GPS goes quiet during a run, because the distance silently stops
+// counting. A usable fix is one good enough to count. Same rules as RunEngine.kt.
+class GpsWatch {
+    static LOST_AFTER_MS = 30000;
+    static FIRST_FIX_MS = 60000;
+    static REMIND_EVERY_MS = 300000;
+
+    constructor(now) {
+        this.reset(now);
+        this.everFixed = false;
+    }
+
+    // Start of the run, or a resume: the wait starts over
+    reset(now) {
+        this.lastFix = now;
+        this.lost = false;
+        this.saidAt = 0;
+    }
+
+    // Returns what to say, or null
+    fix(now) {
+        const wasLost = this.lost;
+        this.reset(now);
+        this.everFixed = true;
+        return wasLost ? "GPS is back." : null;
+    }
+
+    tick(now) {
+        if (this.lost) {
+            if (now - this.saidAt < GpsWatch.REMIND_EVERY_MS) return null;
+        } else if (now - this.lastFix < (this.everFixed ? GpsWatch.LOST_AFTER_MS : GpsWatch.FIRST_FIX_MS)) {
+            return null;
+        }
+        this.lost = true;
+        this.saidAt = now;
+        return this.everFixed ? "GPS signal lost. Distance isn't counting." : "Still no GPS. Distance isn't counting yet.";
+    }
+}
+
+if (typeof module !== "undefined") {
+    module.exports = GpsFilter;
+    module.exports.GpsWatch = GpsWatch;
+}

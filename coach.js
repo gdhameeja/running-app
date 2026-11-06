@@ -264,7 +264,7 @@ const TuneInPlanner = (() => {
     }
 
     function pool(runs, now) {
-        return runs.filter(r => r.endTime && r.startTime < now && r.startTime > now - WINDOW_DAYS * DAY_MS &&
+        return runs.filter(r => r.endTime && !r.activity && r.startTime < now && r.startTime > now - WINDOW_DAYS * DAY_MS &&
             r.distance >= 1500 && r.time >= 480 && r.pace >= 150 && r.pace <= 900)
             .sort((a, b) => b.startTime - a.startTime)
             .slice(0, POOL);

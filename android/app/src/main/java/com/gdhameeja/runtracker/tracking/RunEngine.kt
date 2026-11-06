@@ -83,6 +83,30 @@ data class RunConfig(
 )
 
 /**
+ * Where a run had got to beyond what its lists hold, so that it can carry on
+ * after the app was killed. Times are moving ms since the start, except
+ * [pausedAt], the wall clock of a pause in progress (0 if none).
+ */
+data class EngineState(
+    val nextMilestone: Double,
+    val splitStartMs: Long,
+    val lastTimeSeriesDistance: Double,
+    val lastTimeSeriesMs: Long,
+    val stepCount: Long,
+    val guidedIndex: Int,
+    val guidedStarted: Boolean,
+    val guidedCompleted: Boolean,
+    val ghostWon: Boolean?,
+    val cueDistance: Double,
+    val cueGap: Double,
+    val cueAtMs: Long,
+    val cueLeader: String?,
+    val ghostDoneAnnounced: Boolean,
+    val everFixed: Boolean,
+    val pausedAt: Long,
+)
+
+/**
  * Constant-velocity Kalman filter in local metres, one [position, velocity]
  * filter per axis (east, north). Each fix updates it with the position,
  * weighted by its reported accuracy, and with the receiver's Doppler speed and
@@ -180,10 +204,11 @@ class GpsFilter {
     /** Starts over at this fix (first fix, after a pause or a GPS gap). */
     fun reset(lat: Double, lng: Double, accuracy: Double, timeMs: Long, speed: Double? = null, bearing: Double? = null): Estimate {
         originLat = lat; originLng = lng; cosLat = cos(Math.toRadians(lat))
-        val v = velocity(speed, bearing) ?: doubleArrayOf(0.0, 0.0)
+        val known = velocity(speed, bearing)
+        val v = known ?: doubleArrayOf(0.0, 0.0)
         val pv = accuracy * accuracy
-        // Unknown velocity starts with a wide (5 m/s) uncertainty
-        val vv = if (speed == null) 25.0 else VELOCITY_SIGMA * VELOCITY_SIGMA
+        // Unknown velocity (no speed, or moving with no bearing) starts with a wide (5 m/s) uncertainty
+        val vv = if (known == null) 25.0 else VELOCITY_SIGMA * VELOCITY_SIGMA
         for (i in 0..1) { pos[i] = 0.0; vel[i] = v[i]; doubleArrayOf(pv, 0.0, 0.0, vv).copyInto(cov[i]) }
         time = timeMs
         rejects = 0
@@ -215,6 +240,11 @@ class RunEngine(val config: RunConfig, now: Long) {
         const val CUE_EVERY_M = 250.0
         const val CUE_MIN_INTERVAL_MS = 30_000L
         const val LEAD_HYSTERESIS_M = 5.0
+
+        // GPS warnings; same rules as GpsWatch in gps-filter.js
+        const val GPS_LOST_MS = 30_000L
+        const val GPS_FIRST_FIX_MS = 60_000L
+        const val GPS_REMIND_MS = 300_000L
 
         fun spokenMetres(metres: Double): String {
             val m = abs(metres)
@@ -363,6 +393,14 @@ class RunEngine(val config: RunConfig, now: Long) {
     private var cueLeader: String? = null
     private var ghostDoneAnnounced = false
 
+    /** No usable fix for a while: the distance has stopped counting. */
+    var gpsLost = false
+        private set
+    private var lastUsableFixAt = now
+    private var everFixed = false
+    private var gpsSaidAt = 0L
+    private var gpsBackPending = false
+
     val pointCount get() = pathSegments.sumOf { it.size }
     val lastPoint get() = pathSegments.lastOrNull { it.isNotEmpty() }?.last()
 
@@ -386,7 +424,47 @@ class RunEngine(val config: RunConfig, now: Long) {
         prevPosition = null
         filter = null
         lastRawFixTime = null
+        // The wait for GPS starts over
+        lastUsableFixAt = now
+        gpsLost = false
+        gpsBackPending = false
         status = Status.RUNNING
+    }
+
+    /** What [restore] needs, alongside the lists. */
+    fun state() = EngineState(
+        nextMilestone, lastMilestoneTime - startTime, lastTimeSeriesDistance, lastTimeSeriesTime, stepCount,
+        guidedIndex, guidedStarted, guidedCompleted, ghostWon, cueDistance, cueGap, cueAt - startTime, cueLeader,
+        ghostDoneAnnounced, everFixed, if (status == Status.PAUSED) pausedAt else 0L,
+    )
+
+    /**
+     * Carries on with a run the app lost, [elapsedMs] of moving time in, last saved
+     * at [savedAt]. It comes back paused from that moment, so the time the app was
+     * gone counts as a pause, and the next fix after resuming starts a new segment.
+     * The lists are filled by the caller (RunJson.restore).
+     */
+    fun restore(s: EngineState, elapsedMs: Long, savedAt: Long, distance: Double, estimated: Double) {
+        pausedAt = if (s.pausedAt > 0) s.pausedAt else savedAt
+        startTime = pausedAt - elapsedMs
+        status = Status.PAUSED
+        totalDistance = distance
+        estimatedDistance = estimated
+        nextMilestone = s.nextMilestone
+        lastMilestoneTime = startTime + s.splitStartMs
+        lastTimeSeriesDistance = s.lastTimeSeriesDistance
+        lastTimeSeriesTime = s.lastTimeSeriesMs
+        stepCount = s.stepCount
+        guidedIndex = s.guidedIndex
+        guidedStarted = s.guidedStarted
+        guidedCompleted = s.guidedCompleted
+        ghostWon = s.ghostWon
+        cueDistance = s.cueDistance
+        cueGap = s.cueGap
+        cueAt = startTime + s.cueAtMs
+        cueLeader = s.cueLeader
+        ghostDoneAnnounced = s.ghostDoneAnnounced
+        everFixed = s.everFixed
     }
 
     fun finish(now: Long) {
@@ -416,6 +494,12 @@ class RunEngine(val config: RunConfig, now: Long) {
         lastRawFixTime = now
         lastAccuracy = accuracy
         if (accuracy > MAX_ACCURACY_M) return emptyList()
+        lastUsableFixAt = now
+        everFixed = true
+        if (gpsLost) {
+            gpsLost = false
+            gpsBackPending = true // said on the next tick, whatever becomes of this fix
+        }
         lastSpeed = speed
         lastBearing = bearing
         lastMotionAt = now
@@ -536,7 +620,32 @@ class RunEngine(val config: RunConfig, now: Long) {
         val speech = mutableListOf<String>()
         speech += checkGhost(now)
         if (status == Status.RUNNING) speech += tickGuided(now)
+        if (status == Status.RUNNING) gpsCue(now)?.let { speech += it }
         return logged(speech, now)
+    }
+
+    private fun gpsCue(now: Long): String? {
+        if (gpsBackPending) {
+            gpsBackPending = false
+            return "GPS is back."
+        }
+        if (gpsLost) {
+            if (now - gpsSaidAt < GPS_REMIND_MS) return null
+        } else if (now - lastUsableFixAt < (if (everFixed) GPS_LOST_MS else GPS_FIRST_FIX_MS)) {
+            return null
+        }
+        gpsLost = true
+        gpsSaidAt = now
+        return if (everFixed) "GPS signal lost. Distance isn't counting." else "Still no GPS. Distance isn't counting yet."
+    }
+
+    /** Location was switched off on the phone. Returns what to say. */
+    fun onGpsOff(now: Long): List<String> {
+        if (status != Status.RUNNING) return emptyList()
+        gpsLost = true
+        gpsSaidAt = now
+        gpsBackPending = false
+        return logged(listOf("Location is switched off. Turn it on to keep tracking your distance."), now)
     }
 
     /** Whether the pace coach is running right now. */

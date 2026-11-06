@@ -13,11 +13,11 @@ let isPaused = false;
 let pausedTime = 0;
 
 let gpsFilter = null;
+let gpsWatch = null;
 // Smoothed speed from the GPS filter, for the live pace readout: { mps, at }
 let currentSpeed = null;
 let lastFixTime = null;
 
-let db;
 let currentRunId = null;
 let timeSeriesData = [];
 let lastTimeSeriesDistance = 0;
@@ -47,95 +47,8 @@ let pauseData = [];
 // Everything said during the run, [moving ms, text], and how each Tune-In part went
 let coachLog = [];
 let coachResults = null;
-
-// ─── IndexedDB (v2: adds courseProgress store) ─────────────────────────────────
-
-function initDB() {
-    return new Promise((resolve, reject) => {
-        const request = indexedDB.open("RunDB", 2);
-
-        request.onerror = (event) => {
-            console.error("IndexedDB error:", event.target.error);
-            reject("Error opening database");
-        };
-
-        request.onsuccess = (event) => {
-            db = event.target.result;
-            resolve(db);
-        };
-
-        request.onupgradeneeded = (event) => {
-            const db = event.target.result;
-
-            if (!db.objectStoreNames.contains("runs")) {
-                const runsStore = db.createObjectStore("runs", { keyPath: "runId" });
-                runsStore.createIndex("startTime", "startTime", { unique: false });
-            }
-
-            if (!db.objectStoreNames.contains("courseProgress")) {
-                const cpStore = db.createObjectStore("courseProgress", { keyPath: "progressId" });
-                cpStore.createIndex("courseId", "courseId", { unique: false });
-                cpStore.createIndex("status", "status", { unique: false });
-            }
-        };
-    });
-}
-
-// Every local write stamps `updatedAt`, so cloud sync (sync.js) knows what changed.
-function saveRun(runData) {
-    runData.updatedAt = Date.now();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(["runs"], "readwrite");
-        const store = tx.objectStore("runs");
-        const req = store.add(runData);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = (e) => reject("Error saving run: " + e.target.error);
-    });
-}
-
-function updateRun(runData) {
-    runData.updatedAt = Date.now();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(["runs"], "readwrite");
-        const store = tx.objectStore("runs");
-        const req = store.put(runData);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = (e) => reject("Error updating run: " + e.target.error);
-    });
-}
-
-function getAllRuns() {
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(["runs"], "readonly");
-        const store = tx.objectStore("runs");
-        const req = store.getAll();
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = (e) => reject("Error retrieving runs: " + e.target.error);
-    });
-}
-
-function getRunById(runId) {
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(["runs"], "readonly");
-        const req = tx.objectStore("runs").get(runId);
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = (e) => reject("Error retrieving run: " + e.target.error);
-    });
-}
-
-function getLatestRun() {
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(["runs"], "readonly");
-        const store = tx.objectStore("runs");
-        const index = store.index("startTime");
-        const req = index.openCursor(null, "prev");
-        req.onsuccess = (event) => {
-            const cursor = event.target.result;
-            resolve(cursor ? cursor.value : null);
-        };
-        req.onerror = (e) => reject("Error retrieving latest run: " + e.target.error);
-    });
-}
+// Set just before Start to make this a "walk": same tracking, kept out of your running numbers
+let nextActivity = null;
 
 // ─── Course Progress DB ────────────────────────────────────────────────────────
 
@@ -168,21 +81,14 @@ function getCourseProgress(courseId) {
         const index = store.index("courseId");
         const req = index.getAll(courseId);
         req.onsuccess = () => {
+            // The enrolment that's going, else the last one you finished, so a
+            // finished course still shows its ticks instead of looking unstarted
             const active = req.result.find(p => p.status === "active");
-            resolve(active || null);
+            const finished = req.result.filter(p => p.status === "completed").sort((a, b) => b.startDate - a.startDate)[0];
+            resolve(active || finished || null);
         };
         req.onerror = (e) => reject(e.target.error);
     });
-}
-
-// ─── Previous Run Helpers ──────────────────────────────────────────────────────
-
-function findPreviousTime(timeSeries, currentDistance) {
-    if (!timeSeries || timeSeries.length === 0) return null;
-    for (let i = 0; i < timeSeries.length; i++) {
-        if (timeSeries[i].distance >= currentDistance) return timeSeries[i].time;
-    }
-    return null;
 }
 
 // Turns the run screen into the finished run's summary.
@@ -192,7 +98,7 @@ function displayRunSummary(run) {
     document.getElementById("pace").textContent = run.distance > 0 ? formatPace(run.pace) : "--:--";
     const summaryElement = document.getElementById("rs-summary");
     summaryElement.innerHTML = `
-        <div class="rs-summary-title">Run complete · ${formatRunDate(run.startTime)}</div>
+        <div class="rs-summary-title">${run.activity === "walk" ? "Walk" : "Run"} complete · ${formatRunDate(run.startTime)}</div>
         ${run.estimatedDistance > 50 ? `<p class="summary-note">${(run.estimatedDistance / 1000).toFixed(2)} km was estimated in straight lines across GPS gaps (screen off or app in background), so the real distance is probably a little higher.</p>` : ""}
         <p class="summary-extra"></p>
         ${RunDetail.rpeHtml(run)}`;
@@ -245,6 +151,8 @@ document.addEventListener("DOMContentLoaded", () => {
         })
         .then(() => {
             checkForInterruptedRun();
+            migrateRouteNames().catch(err => console.warn("Route names not moved:", err));
+            if (!isRunLive()) Gym.init();
             renderHomeRecent();
             renderFeelPicker();
             updateHomeGpsWatch();
@@ -316,6 +224,8 @@ function showTab(name) {
 
 document.getElementById("start").addEventListener("click", () => {
     document.getElementById("start").disabled = true;
+    const activity = nextActivity;
+    nextActivity = null;
     if (window.speechSynthesis) speechSynthesis.cancel();
     totalDistance = 0;
     estimatedDistance = 0;
@@ -356,10 +266,11 @@ document.getElementById("start").addEventListener("click", () => {
 
     getLatestRun()
         .then(previousRun => {
-            window.previousRunTimeSeries = previousRun ? previousRun.timeSeries : null;
+            window.previousRunTimeSeries = previousRun && !activity ? previousRun.timeSeries : null;
             currentRunId = Date.now();
             return saveRun({
                 runId: currentRunId,
+                activity: activity || undefined,
                 startTime: startTime,
                 endTime: null,
                 distance: 0,
@@ -396,6 +307,7 @@ document.getElementById("start").addEventListener("click", () => {
             }
             requestWakeLock();
             startBackgroundAudio();
+            gpsWatch = new GpsWatch(Date.now());
             watchId = startTracking();
         })
         .then(() => startAutoSave())
@@ -406,7 +318,7 @@ document.getElementById("start").addEventListener("click", () => {
                     ? "Location permission denied. Please enable location access to track your run."
                     : "Could not start the run: " + (error && error.message || error));
                 nativeRun = false;
-                db.transaction(["runs"], "readwrite").objectStore("runs").delete(currentRunId);
+                forgetRun(currentRunId);
                 currentRunId = null;
                 endRun(Date.now());
                 return;
@@ -432,6 +344,7 @@ document.getElementById("pause").addEventListener("click", () => {
         lastMilestoneTime += (Date.now() - pausedTime);
         prevPosition = null;
         gpsFilter = null;
+        if (gpsWatch) gpsWatch.reset(Date.now());
         updateTimer();
         watchId = startTracking();
         isPaused = false;
@@ -472,6 +385,7 @@ function stopRun() {
 // Resets the run UI and saves the finished run. Returns a promise.
 function endRun(endTime) {
     clearInterval(timerInterval);
+    gpsWatch = null;
     stopAutoSave();
     releaseWakeLock();
     stopBackgroundAudio();
@@ -492,11 +406,7 @@ function endRun(endTime) {
         startTime += (endTime - pausedTime);
     }
     isPaused = false;
-    // The last Tune-In part counts too, even if you stopped early (web runs; the service does its own)
-    if (guidedRun && guidedRun.coach) {
-        guidedRun.coach.finish(endTime - startTime, totalDistance);
-        coachResults = { eases: guidedRun.coach.eases, parts: guidedRun.coach.results };
-    }
+    finishCoach(endTime - startTime);
 
     if (ghostRace) {
         document.getElementById("ghost-panel").style.display = "none";
@@ -532,6 +442,13 @@ function endRun(endTime) {
             });
         })
         .catch(error => console.error("Error updating run:", error));
+}
+
+// The last Tune-In part counts too, even if you stopped early (web runs; the service does its own)
+function finishCoach(movingMs) {
+    if (!guidedRun || !guidedRun.coach) return;
+    guidedRun.coach.finish(movingMs, totalDistance);
+    coachResults = { eases: guidedRun.coach.eases, parts: guidedRun.coach.results };
 }
 
 // The data for learning beyond distance and time (see docs/ANDROID.md, "Run data")
@@ -611,49 +528,37 @@ function stopAutoSave() {
 
 function autoSaveRun() {
     if (!currentRunId || !db) return;
-    const tx = db.transaction(["runs"], "readwrite");
-    const store = tx.objectStore("runs");
-    const req = store.get(currentRunId);
-    req.onsuccess = () => {
-        const runData = req.result;
-        if (runData) {
-            const elapsed = isPaused
-                ? (pausedTime - startTime) / 1000
-                : (Date.now() - startTime) / 1000;
-            runData.distance = totalDistance;
-            runData.time = elapsed;
-            runData.pace = totalDistance > 0 ? (elapsed / (totalDistance / 1000)) : 0;
-            runData.timeSeries = timeSeriesData;
-            runData.track = trackData;
-            runData.pathSegments = [...pathSegments, currentSegment];
-            runData.estimatedDistance = estimatedDistance;
-            Object.assign(runData, extraRunData());
-            store.put(runData);
-        }
-    };
+    const elapsed = isPaused
+        ? (pausedTime - startTime) / 1000
+        : (Date.now() - startTime) / 1000;
+    saveLiveRun(currentRunId, Object.assign({
+        distance: totalDistance,
+        time: elapsed,
+        pace: totalDistance > 0 ? (elapsed / (totalDistance / 1000)) : 0,
+        timeSeries: timeSeriesData,
+        track: trackData,
+        pathSegments: [...pathSegments, currentSegment],
+        estimatedDistance,
+    }, extraRunData())).catch(err => console.error("Autosave failed:", err));
 }
 
 function checkForInterruptedRun() {
     getAllRuns().then(runs => {
-        const tx = db.transaction(["runs"], "readwrite");
         const unfinished = runs.filter(r => r.endTime === null && r.runId !== currentRunId);
-        unfinished.filter(r => !(r.distance > 50))
-            .forEach(r => tx.objectStore("runs").delete(r.runId));
-        const interrupted = unfinished.find(r => r.distance > 50);
-        if (interrupted) {
-            const dist = (interrupted.distance / 1000).toFixed(2);
-            const time = formatTime(Math.floor(interrupted.time || 0));
-            if (confirm(`Found an interrupted run (${dist} km, ${time}). Save it?`)) {
-                interrupted.endTime = interrupted.startTime + (interrupted.time || 0) * 1000;
-                if (interrupted.distance > 0 && interrupted.time > 0) {
-                    interrupted.pace = interrupted.time / (interrupted.distance / 1000);
-                }
-                updateRun(interrupted).then(() => displayRunSummary(interrupted));
-            } else {
-                const tx = db.transaction(["runs"], "readwrite");
-                tx.objectStore("runs").delete(interrupted.runId);
-            }
-        }
+        unfinished.filter(r => !(r.distance > 50)).forEach(r => forgetRun(r.runId));
+        const found = unfinished.find(r => r.distance > 50);
+        if (!found) return;
+        const dist = (found.distance / 1000).toFixed(2);
+        const time = formatTime(Math.floor(found.time || 0));
+        if (!confirm(`Found an interrupted run (${dist} km, ${time}). Save it?`)) return forgetRun(found.runId);
+        return getRunById(found.runId).then(run => {
+            run.endTime = run.startTime + RunAnalysis.wallOffset(run, (run.time || 0) * 1000);
+            if (run.distance > 0 && run.time > 0) run.pace = run.time / (run.distance / 1000);
+            return updateRun(run).then(() => {
+                displayRunSummary(run);
+                CloudSync.soon();
+            });
+        });
     });
 }
 
@@ -744,8 +649,9 @@ document.getElementById("lock-screen").addEventListener("click", showLockOverlay
 
 // ─── Status helpers ────────────────────────────────────────────────────────────
 
-function updateGpsStatus(accuracy) {
+function updateGpsStatus(accuracy, lost = false) {
     const el = document.getElementById("gps-status");
+    if (lost) { el.textContent = "No GPS signal — distance isn't counting"; el.className = "gps-weak"; return; }
     if (accuracy == null) { el.textContent = ""; el.className = ""; return; }
     const good = accuracy <= MAX_ACCURACY_M;
     el.textContent = good ? `GPS ±${Math.round(accuracy)} m` : `Weak GPS ±${Math.round(accuracy)} m — waiting for a better signal`;
@@ -770,10 +676,20 @@ function updateTimer() {
             document.getElementById("pace").textContent = formatPace(paceInSeconds);
         }
         renderCurrentPace();
+        checkGpsWatch();
         if (ghostRace) updateGhostPanel();
         updateLockOverlay();
         renderRunBar();
     }, 1000);
+}
+
+// Web runs only (the service does its own). A hidden page gets no GPS by design,
+// and the toast on coming back explains that.
+function checkGpsWatch() {
+    if (!gpsWatch || document.hidden) return;
+    const said = gpsWatch.tick(Date.now());
+    if (said) speakText(said);
+    if (gpsWatch.lost) updateGpsStatus(null, true);
 }
 
 // Pace right now from the GPS filter's smoothed speed. Blank when you're
@@ -782,41 +698,6 @@ function renderCurrentPace() {
     const s = currentSpeed;
     const live = s && !isPaused && Date.now() - s.at < 5000 && s.mps >= 0.8;
     document.getElementById("current-pace").textContent = live ? formatPace(1000 / s.mps) : "--:--";
-}
-
-function formatTime(seconds) {
-    let mins = Math.floor(seconds / 60);
-    let secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-}
-
-function getDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371000;
-    const dLat = (lat2 - lat1) * (Math.PI / 180);
-    const dLon = (lon2 - lon1) * (Math.PI / 180);
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
-
-// Chrome/Safari stop delivering GPS to a page that isn't visible (screen off or
-// app switched), so a gap between fixes is normal. Rather than throwing away the
-// distance covered during a gap, bridge it with a straight line (an underestimate
-// on curvy routes, but far better than zero) as long as the implied speed is
-// plausible for running.
-const GAP_THRESHOLD_MS = 10000;
-const MAX_SPEED_MPS = 12.5;
-const MAX_ACCURACY_M = 20;
-
-function classifyFix(prev, curr) {
-    const dist = getDistance(prev.lat, prev.lon, curr.lat, curr.lon);
-    const dt = (curr.time - prev.time) / 1000;
-    const isGap = curr.time - prev.lastRawTime > GAP_THRESHOLD_MS;
-    if (dt > 0 && dist / dt > MAX_SPEED_MPS) return { action: "reject", dist, dt, isGap };
-    if (!isGap && dist < 3) return { action: "skip", dist, dt, isGap };
-    return { action: "accept", dist, dt, isGap };
 }
 
 function startTracking() {
@@ -836,7 +717,14 @@ function startTracking() {
             r1(accuracy, 10), r1(altitude, 10), r1(gpsSpeed, 100), r1(gpsBearing, 10)]);
         lastAltitude = altitude;
 
-        if (accuracy > MAX_ACCURACY_M) return;
+        if (accuracy > MAX_ACCURACY_M) {
+            if (gpsWatch && gpsWatch.lost) updateGpsStatus(null, true);
+            return;
+        }
+        if (gpsWatch) {
+            const said = gpsWatch.fix(now);
+            if (said) speakText(said);
+        }
 
         let { latitude, longitude } = position.coords;
         lastGpsMotion = { speed: gpsSpeed, bearing: gpsBearing, at: now };
@@ -1120,15 +1008,26 @@ function formatRunDate(t) {
         " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
-// 1:05:09 for an hour or more, otherwise 54:27
-function formatDuration(seconds) {
-    const s = Math.floor(seconds);
-    if (s < 3600) return formatTime(s);
-    return `${Math.floor(s / 3600)}:${formatTime(s % 3600).padStart(5, "0")}`;
-}
-
 function runCardHtml(run) {
-    const tag = run.guided ? run.guided.title : run.ghost ? `vs ${run.ghost.label || "ghost"}` : "";
+    if (run.activity === "strength") {
+        const sets = (run.exercises || []).reduce((n, e) => n + e.sets.length, 0);
+        const count = (run.exercises || []).length;
+        return `
+        <button class="run-card" data-id="${run.runId}">
+            <div class="run-card-top">
+                <span class="run-card-date">${formatRunDate(run.startTime)}</span>
+                <span class="run-card-tag">${escapeHtml(run.title || "Gym")}</span>
+            </div>
+            <div class="run-card-stats">
+                <span><b>${count}</b> exercise${count === 1 ? "" : "s"}</span>
+                <span><b>${sets}</b> set${sets === 1 ? "" : "s"}</span>
+                ${StrengthPlanner.volume(run) > 0 ? `<span><b>${Math.round(StrengthPlanner.volume(run)).toLocaleString()}</b> kg</span>`
+                    : StrengthPlanner.totalReps(run) > 0 ? `<span><b>${StrengthPlanner.totalReps(run).toLocaleString()}</b> reps</span>`
+                    : `<span><b>${StrengthPlanner.totalHeld(run)}</b> s held</span>`}
+            </div>
+        </button>`;
+    }
+    const tag = run.activity === "walk" ? "Walk" : run.guided ? run.guided.title : run.ghost ? `vs ${run.ghost.label || "ghost"}` : "";
     return `
         <button class="run-card" data-id="${run.runId}" ${run.endTime ? "" : "disabled"}>
             <div class="run-card-top">
@@ -1261,8 +1160,15 @@ function renderPauseButton(paused) {
         ? '<span class="material-icons">play_arrow</span><span class="btn-label">Resume</span>'
         : '<span class="material-icons">pause</span><span class="btn-label">Pause</span>';
     runScreen().dataset.state = paused ? "paused" : "running";
+    renderCurrentPace();
 }
 
+document.getElementById("start-walk").addEventListener("click", () => {
+    if (isRunLive()) return;
+    nextActivity = "walk";
+    document.getElementById("start").click();
+});
+document.getElementById("open-gym").addEventListener("click", () => Gym.open());
 document.getElementById("run-bar").addEventListener("click", openRunScreen);
 document.getElementById("rs-minimise").addEventListener("click", () => minimiseRunScreen(false));
 document.getElementById("rs-done-btn").addEventListener("click", () => closeRunScreen());
@@ -1432,9 +1338,9 @@ function renderTuneInCard() {
     });
 }
 
-function openCourseDetail(courseId) {
+function openCourseDetail(courseId, level = "beginner") {
     selectedCourseId = courseId;
-    selectedLevel = "beginner";
+    selectedLevel = level;
     const course = COURSES.find(c => c.id === courseId);
     if (!course) return;
 
@@ -1448,7 +1354,7 @@ function openCourseDetail(courseId) {
     document.getElementById("cd-description").textContent = course.description;
 
     document.querySelectorAll(".level-btn").forEach(btn => {
-        btn.classList.toggle("active", btn.dataset.level === "beginner");
+        btn.classList.toggle("active", btn.dataset.level === level);
     });
 
     updateLevelView();
@@ -1465,14 +1371,15 @@ function updateLevelView() {
     getCourseProgress(selectedCourseId).then(progress => {
         const startBtn = document.getElementById("start-course");
         startBtn.style.display = "";
-        if (progress && progress.level === selectedLevel) {
+        const active = progress && progress.status === "active";
+        if (active && progress.level === selectedLevel) {
             // The "Up next" card takes over
             startBtn.style.display = "none";
-        } else if (progress) {
+        } else if (active) {
             startBtn.textContent = `Already enrolled at ${progress.level}`;
             startBtn.disabled = true;
         } else {
-            startBtn.textContent = "Start Course";
+            startBtn.textContent = progress && progress.level === selectedLevel ? "Start again" : "Start Course";
             startBtn.disabled = false;
         }
         renderSessionList(course, selectedLevel, progress);
@@ -1638,7 +1545,7 @@ document.querySelectorAll(".level-btn").forEach(btn => {
 
 document.getElementById("start-course").addEventListener("click", () => {
     getCourseProgress(selectedCourseId).then(existing => {
-        if (existing && existing.level === selectedLevel) {
+        if (existing && existing.status === "active" && existing.level === selectedLevel) {
             // Already enrolled — just scroll to sessions
             document.getElementById("session-list").scrollIntoView({ behavior: "smooth" });
             return;
@@ -1690,12 +1597,7 @@ function refreshActiveBanner() {
 document.getElementById("acb-view").addEventListener("click", () => {
     getActiveCourses().then(active => {
         if (active.length > 0) {
-            selectedLevel = active[0].level;
-            openCourseDetail(active[0].courseId);
-            document.querySelectorAll(".level-btn").forEach(b => {
-                b.classList.toggle("active", b.dataset.level === selectedLevel);
-            });
-            updateLevelView();
+            openCourseDetail(active[0].courseId, active[0].level);
         }
     });
 });
@@ -1783,9 +1685,10 @@ function startGuidedSession(sess, courseId, levelKey, sessionIndex) {
         announcedWarnings: {}
     };
 
-    // Auto-enroll if not already in this course+level
+    // Auto-enroll if not on this course. A session from another level than the
+    // one you're enrolled at is a one-off: a second enrolment would never get ticked.
     getCourseProgress(courseId).then(progress => {
-        if (courseId !== TUNE_IN_ID && (!progress || progress.level !== levelKey)) {
+        if (courseId !== TUNE_IN_ID && (!progress || progress.status !== "active")) {
             return saveCourseProgress({
                 progressId: `${courseId}-${levelKey}-${Date.now()}`,
                 courseId, level: levelKey,
@@ -1958,6 +1861,7 @@ function completeGuidedRun() {
     if (!guidedRun || guidedRun.completing) return;
     guidedRun.completing = true;
     clearInterval(guidedRun.segmentInterval);
+    finishCoach(runElapsedMs());
 
     speakText("Workout complete! Great job!");
 

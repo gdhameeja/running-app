@@ -86,6 +86,14 @@ hour). A ghost race against a run with a track replays its exact path and
 pacing; older runs fall back to the 100 m splits. Speed and bearing come from
 the GPS receiver itself and give the AR view an instant direction of travel.
 
+On the phone a run is split in two (`run-store.js`): `raw`, `track` and
+`pathSegments` live in the `runDetails` store and everything else in `runs`, so
+lists and stats don't load every run's GPS data. `getAllRuns()` gives summaries;
+`getRunById()` gives the whole run. Each finished run's summary has `derived`
+(its route signature and best efforts, from the full track), which never leaves
+the phone. Without the track, a summary's `seriesForRun` uses the 100 m
+`timeSeries`, which is what Tune-In plans and route leaderboards read.
+
 Runs also store what they were doing, for the run detail page:
 
 - `ghost`: the ghost raced, as a small spec (`{ type: "run", runId, targetM }`
@@ -94,6 +102,8 @@ Runs also store what they were doing, for the run detail page:
 - `guided`: the course session (title and segments) for the workout report.
 - `ratings`: effort check-ins from the old Tune-In course, `[[movingMs, rating 1-5], ...]`.
 - `updatedAt`: when the record last changed on this phone, for cloud sync.
+- `routeName`: the name you gave a route, on the route's oldest run, so it's
+  backed up with the run.
 
 Recorded during the run (web and service alike):
 
@@ -165,3 +175,36 @@ gentler.
   in the browser. Keep the two in step.
 - **Workout targets** are pace ranges scaled from your predicted 5K pace
   (Riegel, best run of 1.5 km+ in the last 120 days); see `segmentTarget`.
+
+## Walks and gym sessions
+
+Both are records in the `runs` store with an `activity`, so history, sync, backup
+and delete work as they do for runs. Anything about running (PBs, Tune-In, routes,
+ghosts, the pace chart, weekly volume) skips records with an `activity`.
+
+- `activity: "walk"`: an ordinary tracked run, with its own stats line.
+- `activity: "strength"`: distance 0, with
+  `exercises: [{ id, name, variation, level, levels, unit, sets: [{ weight, reps, target }] }]`
+  (`unit: "s"` for timed holds, whose `reps` and `target` are seconds).
+  `strength-plan.js` suggests each set. It's built for no equipment: most exercises are
+  a ladder of harder variations, and hitting the top of the rep range moves you up one.
+  Backpack rows cover pulling without a bar.
+  Exercises with weights use kilos for rungs. Your workouts sync as the
+  `strength-routines` record in the course progress store. `WorkoutService.kt` speaks
+  rest timers and holds, so they carry on with the screen locked.
+
+## When GPS drops or the app is killed
+
+During a run the service says "GPS signal lost" after 30 s with no fix good
+enough to count (60 s at the start), repeats it every 5 minutes, and says "GPS
+is back" when it returns. Switching location off is announced at once. The run
+screen and the notification show it too. Same rules for web runs (`GpsWatch` in
+`gps-filter.js`, `gpsCue` in `RunEngine.kt`).
+
+If Android kills the app mid-run, the service's last snapshot (every 10 s, with
+`engine` state) and the run's config (`active_run_config.json`) are still on
+disk. Opening the app within 12 hours offers to carry on: `RunJson.restore`
+rebuilds the engine, paused from the moment of the last save. The time away
+counts as a pause, no distance is invented for it, and guided runs and ghost
+races pick up where they were. Tap Resume when you're ready. Decline, and you
+get the usual prompt to save or discard what was recorded.

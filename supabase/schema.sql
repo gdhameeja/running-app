@@ -26,6 +26,12 @@ create index if not exists course_progress_updated on public.course_progress (us
 -- The app pulls "rows changed since", so updated_at must move on every write
 create or replace function public.touch_updated_at() returns trigger language plpgsql as $$
 begin
+    -- A phone that's behind can't replace a newer copy with its older one
+    if tg_op = 'UPDATE' then
+        if new.client_updated_at < old.client_updated_at then
+            return null;
+        end if;
+    end if;
     new.updated_at := now();
     return new;
 end $$;
@@ -49,7 +55,9 @@ create policy "own course progress" on public.course_progress for all to authent
     using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- Signed-in users only (works with "Automatically expose new tables" off);
--- the policies above still limit them to their own rows. Nothing is ever deleted.
+-- the policies above still limit them to their own rows. Nothing is ever deleted:
+-- a run deleted in the app stays as a small row marked { "deleted": true }, which
+-- is how other phones find out. Its GPS data is gone from the row.
 revoke all on public.runs, public.course_progress from anon;
 grant select, insert, update on public.runs, public.course_progress to authenticated;
 

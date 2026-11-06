@@ -21,8 +21,14 @@ const NativeTracker = (() => {
         getState: () => call("getState").then(r => r.run || null),
         clear: () => call("clear"),
         speak: (text) => call("speak", { text }),
-        // Backups and updates (sync.js): resolves with where the file went
-        saveFile: (name, text) => call("saveFile", { name, text }).then(r => r.location),
+        // Carries on with a run the app lost; resolves with its snapshot, paused
+        continueRun: () => call("resumeInterrupted").then(r => r.run),
+        // Backups and updates (sync.js): a file written a piece at a time, as
+        // the whole history wouldn't fit in one message. Finish resolves with where it went.
+        fileStart: (name) => call("fileStart", { name }),
+        fileAppend: (text) => call("fileAppend", { text }),
+        fileFinish: () => call("fileFinish").then(r => r.location),
+        fileCancel: () => call("fileCancel"),
         openUrl: (url) => call("openUrl", { url }),
         appInfo: () => call("appInfo"),
         // Watch data through Health Connect (enrich.js)
@@ -33,6 +39,10 @@ const NativeTracker = (() => {
         isIgnoringBatteryOptimizations: () => call("isIgnoringBatteryOptimizations").then(r => r.value),
         requestBatteryExemption: () => call("requestBatteryExemption"),
         onUpdate: (cb) => cap.addListener("RunTracker", "update", cb),
+        // Gym voice (strength.js): cues are [{ inMs, text }], replacing any still to come
+        workoutStart: (title) => call("workoutStart", { title }),
+        workoutCues: (cues, label) => call("workoutCues", { cues, label }),
+        workoutStop: () => call("workoutStop"),
         // AR ghost view (ar-ghost.js)
         startOrientation: () => call("startOrientation"),
         stopOrientation: () => call("stopOrientation"),
@@ -46,10 +56,11 @@ let nativeRun = false;
 let nativeResyncing = false;
 let nativeFinishedRunId = null;
 let lastLocalPauseToggle = 0;
+const CONTINUE_WITHIN_MS = 12 * 3600000;
 
 function startNativeRun() {
     const meta = {
-        // Meta rides along with every update from the service, so it carries the 100 m
+        // Meta is in every snapshot the service writes to disk, so it carries the 100 m
         // splits only; attachNativeRun reloads the full track from IndexedDB.
         ghostRace: ghostRace ? Object.assign({}, ghostRace, { ghostTimeSeries: ghostRace.ghostSplits, ghostSplits: undefined, cue: undefined }) : null,
         guided: guidedRun ? {
@@ -88,10 +99,23 @@ function resumeNativeSession() {
             currentRunId = run.runId;
             return handleNativeFinished(run);
         } else if (run.status === "orphaned") {
-            // The app was killed mid-run; store what we have so checkForInterruptedRun offers to keep it
-            return saveNativeSnapshot(run).then(() => NativeTracker.clear());
+            // The app was killed mid-run: carry on from where it stopped, or
+            // store what we have so checkForInterruptedRun offers to keep it
+            const keep = () => saveNativeSnapshot(run).then(() => NativeTracker.clear());
+            if (!canContinue(run)) return keep();
+            const km = (run.distance / 1000).toFixed(2);
+            if (!confirm(`Your run was cut off at ${km} km. Carry on with it? It stays paused until you tap Resume. Cancel to finish or discard it instead.`)) return keep();
+            return NativeTracker.continueRun().then(attachNativeRun).catch(err => {
+                alert("Couldn't carry on with that run: " + (err && err.message || err));
+                return keep();
+            });
         }
     }).catch(err => console.error("Could not restore native run:", err));
+}
+
+// A snapshot from an older version can't be carried on, nor one left from long ago
+function canContinue(run) {
+    return !!(run.engine && run.savedAt) && Date.now() - run.savedAt < CONTINUE_WITHIN_MS;
 }
 
 function askForBatteryExemptionOnce() {
@@ -173,7 +197,7 @@ function applyNativeSummary(s) {
     estimatedDistance = s.estimatedDistance;
     if (s.motionAgeMs != null) lastGpsMotion = { speed: s.speed, bearing: s.bearing, at: Date.now() - s.motionAgeMs };
     currentSpeed = s.currentSpeedAgeMs != null ? { mps: s.currentSpeed, at: Date.now() - s.currentSpeedAgeMs } : null;
-    updateGpsStatus(s.accuracy);
+    updateGpsStatus(s.accuracy, !!s.gpsLost);
     document.getElementById("distance").textContent = (totalDistance / 1000).toFixed(2);
 
     const localPoints = pathSegments.reduce((n, seg) => n + seg.length, 0) + currentSegment.length;
@@ -214,7 +238,7 @@ function resyncNativeRun() {
     nativeResyncing = true;
     NativeTracker.getState().then(run => {
         nativeResyncing = false;
-        if (!run || run.runId !== currentRunId) return;
+        if (!run || run.runId !== currentRunId || run.status === "orphaned") return;
         if (run.status === "finished") return handleNativeFinished(run);
         applyNativeSnapshot(run);
         redrawPath();

@@ -216,4 +216,70 @@ class RunEngineTest {
         assertEquals("0:05", RunEngine.formatTime(5))
         assertEquals("12:00", RunEngine.formatTime(720))
     }
+
+    // ─── GPS warnings (same cases as GpsWatch in tests.js) ───────────────────
+
+    @Test
+    fun warnsWhenThereIsNoFirstFix() {
+        val e = RunEngine(RunConfig(runId = 1), t0)
+        assertTrue(e.tick(t0 + 59_000).isEmpty())
+        assertEquals(listOf("Still no GPS. Distance isn't counting yet."), e.tick(t0 + 60_000))
+        assertTrue(e.gpsLost)
+        assertTrue(e.tick(t0 + 61_000).isEmpty())
+    }
+
+    @Test
+    fun warnsWhenGpsGoesQuietAndSaysWhenItIsBack() {
+        val r = runner()
+        r.run(10, 3.0)
+        val quiet = r.now
+        assertTrue(r.engine.tick(quiet + 29_000).isEmpty())
+        assertEquals(listOf("GPS signal lost. Distance isn't counting."), r.engine.tick(quiet + 30_500))
+        assertTrue(RunJson.summary(r.engine, quiet + 31_000).getBoolean("gpsLost"))
+        assertTrue(r.engine.tick(quiet + 300_000).isEmpty())
+        assertEquals(listOf("GPS signal lost. Distance isn't counting."), r.engine.tick(quiet + 331_000))
+        r.engine.onLocation(52.1, 4.0, 5.0, quiet + 332_000)
+        assertFalse(r.engine.gpsLost)
+        assertEquals(listOf("GPS is back."), r.engine.tick(quiet + 332_500))
+        assertTrue(r.engine.tick(quiet + 333_000).isEmpty())
+    }
+
+    @Test
+    fun weakFixesDoNotCountAsGps() {
+        val r = runner()
+        r.run(10, 3.0)
+        val quiet = r.now
+        r.engine.onLocation(52.0, 4.0, 60.0, quiet + 20_000)
+        assertEquals(listOf("GPS signal lost. Distance isn't counting."), r.engine.tick(quiet + 30_500))
+    }
+
+    @Test
+    fun noGpsWarningsWhilePausedAndTheWaitStartsOverOnResume() {
+        val r = runner()
+        r.run(10, 3.0)
+        val at = r.now
+        r.engine.pause(at)
+        assertTrue(r.engine.tick(at + 120_000).isEmpty())
+        r.engine.resume(at + 120_000)
+        assertTrue(r.engine.tick(at + 121_000).isEmpty())
+        assertTrue(r.engine.tick(at + 149_000).isEmpty())
+    }
+
+    @Test
+    fun switchingLocationOffWarnsAtOnce() {
+        val r = runner()
+        r.run(10, 3.0)
+        val said = r.engine.onGpsOff(r.now + 1000)
+        assertEquals(1, said.size)
+        assertTrue(said[0].contains("switched off"))
+        assertTrue(r.engine.gpsLost)
+        assertTrue(r.engine.coachLog.any { it.second == said[0] })
+    }
+
+    @Test
+    fun summaryStaysSmallButSnapshotCarriesTheMeta() {
+        val e = RunEngine(RunConfig(runId = 1, meta = "{\"a\":1}"), t0)
+        assertFalse(RunJson.summary(e, t0).has("meta"))
+        assertEquals("{\"a\":1}", RunJson.snapshot(e, t0).getString("meta"))
+    }
 }

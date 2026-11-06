@@ -1,0 +1,34 @@
+# Tests every pull request and branch, so a problem shows up before it reaches
+# main (where release.yml runs the same tests, then publishes the APK).
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "supabase/**"
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The version is the commit count, so it needs the whole history
+          fetch-depth: 0
+      - name: Kotlin tests and a debug build
+        run: docker/build-apk.sh

@@ -56,15 +56,26 @@ to free space without losing anything: [SUPABASE_STORAGE.md](SUPABASE_STORAGE.md
 
 ## Backup file
 
-**History → Cloud backup → Export JSON** saves everything (runs and course
-progress) to `Downloads/run-tracker-backup-<date>.json`. **Import JSON**
-adds any runs from such a file that are missing or older on the phone; it
-never deletes. Use it if the cloud is ever unavailable.
+**History → Cloud backup → Export JSON** saves everything (runs, with their
+route names, and course progress) to `Downloads/run-tracker-backup-<date>.json`,
+one run at a time so a long history can't run the phone out of memory.
+**Import JSON** adds any runs from such a file that are missing or older on
+the phone; it never deletes, and doesn't bring back a run you deleted after
+the backup. Use it if the cloud is ever unavailable.
 
 ## How sync works
 
-- Every local write stamps `updatedAt`. Push sends finished runs and course
-  records stamped after the last push (`client_updated_at` on the server).
-- Pull lists rows whose server `updated_at` is after the last pull, then
-  downloads only the ones newer than the phone's copy.
-- Nothing is deleted on either side. The run in progress is never synced.
+- Every local write stamps `updatedAt`.
+- Pull goes first: it lists rows whose server `updated_at` is after the last
+  pull, then downloads only the ones newer than the phone's copy. So a phone
+  that's behind takes the newer copy rather than sending its old one up.
+- Push then sends finished runs, deletes and course records stamped after the
+  last push (`client_updated_at` on the server), oldest first. Progress is kept
+  after each chunk, so a sync that's cut off carries on from there.
+- Deleting a run replaces its row with `{ runId, deleted: true, updatedAt }`:
+  its GPS data leaves the cloud, and other phones drop the run when they see
+  the row. If one phone edits a run after another deleted it, the later change
+  wins. The run in progress is never synced.
+- Older projects: run [`supabase/schema.sql`](../supabase/schema.sql) again (it's
+  safe to) and the server also refuses an older copy over a newer one, even if
+  two phones sync at the same moment. Sync works without this.

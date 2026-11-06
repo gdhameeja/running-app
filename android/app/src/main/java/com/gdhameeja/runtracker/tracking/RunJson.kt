@@ -66,6 +66,7 @@ object RunJson {
         put("currentSpeed", e.currentSpeed ?: JSONObject.NULL)
         put("currentSpeedAgeMs", e.currentSpeedAt?.let { now - it } ?: JSONObject.NULL)
         put("cadence", e.cadence(now) ?: JSONObject.NULL)
+        put("gpsLost", e.gpsLost)
         if (e.config.guided != null) {
             put("guided", JSONObject().apply {
                 put("index", e.guidedIndex)
@@ -86,11 +87,13 @@ object RunJson {
                 put("instruction", (if (active) c.instruction() else null) ?: JSONObject.NULL)
             })
         }
-        put("meta", e.config.meta ?: JSONObject.NULL)
     }
 
     fun snapshot(e: RunEngine, now: Long): JSONObject = summary(e, now).apply {
+        put("meta", e.config.meta ?: JSONObject.NULL)
         put("endTime", e.endTime ?: JSONObject.NULL)
+        put("savedAt", now)
+        put("engine", engineState(e))
         put("pathSegments", JSONArray().apply {
             e.pathSegments.forEach { seg -> put(JSONArray().apply { seg.forEach { put(point(it)) } }) }
         })
@@ -118,6 +121,98 @@ object RunJson {
                 })
             })
         }
+    }
+
+    private fun engineState(e: RunEngine): JSONObject {
+        val s = e.state()
+        return JSONObject().apply {
+            put("nextMilestone", s.nextMilestone)
+            put("splitStartMs", s.splitStartMs)
+            put("lastTimeSeriesDistance", s.lastTimeSeriesDistance)
+            put("lastTimeSeriesMs", s.lastTimeSeriesMs)
+            put("stepCount", s.stepCount)
+            put("guidedIndex", s.guidedIndex)
+            put("guidedStarted", s.guidedStarted)
+            put("guidedCompleted", s.guidedCompleted)
+            put("ghostWon", s.ghostWon ?: JSONObject.NULL)
+            put("cueDistance", s.cueDistance)
+            put("cueGap", s.cueGap)
+            put("cueAtMs", s.cueAtMs)
+            put("cueLeader", s.cueLeader ?: JSONObject.NULL)
+            put("ghostDoneAnnounced", s.ghostDoneAnnounced)
+            put("everFixed", s.everFixed)
+            put("pausedAt", s.pausedAt)
+            e.coach?.state()?.let { c ->
+                put("coach", JSONObject().apply {
+                    put("scale", c.scale)
+                    put("eases", c.eases)
+                    put("misses", c.misses)
+                    put("seg", c.seg)
+                    put("segStart", c.segStart)
+                    put("segStartDist", c.segStartDist)
+                    put("nextCheckAt", c.nextCheckAt)
+                    put("results", JSONArray().apply {
+                        c.results.forEach { r -> put(JSONArray().put(r.index).put(r.target).put(r.actual ?: JSONObject.NULL)) }
+                    })
+                })
+            }
+        }
+    }
+
+    private fun JSONArray.arrays(): List<JSONArray> = (0 until length()).map { getJSONArray(it) }
+
+    private fun JSONArray.optNumber(i: Int): Double? = if (isNull(i)) null else getDouble(i)
+
+    /**
+     * Rebuilds a run from its last [snapshot] (with `engine` state) and the [config]
+     * it started with. It comes back paused; see [RunEngine.restore].
+     */
+    fun restore(snapshot: JSONObject, config: RunConfig): RunEngine {
+        val st = snapshot.getJSONObject("engine")
+        val e = RunEngine(config, snapshot.getLong("startTime"))
+
+        e.pathSegments.clear()
+        snapshot.getJSONArray("pathSegments").arrays().forEach { seg ->
+            e.pathSegments.add(seg.arrays().map { LatLng(it.getDouble(0), it.getDouble(1)) }.toMutableList())
+        }
+        if (e.pathSegments.isEmpty()) e.pathSegments.add(mutableListOf())
+        snapshot.getJSONArray("gapCoords").arrays().forEach { g ->
+            val a = g.getJSONArray(0)
+            val b = g.getJSONArray(1)
+            e.gapCoords.add(LatLng(a.getDouble(0), a.getDouble(1)) to LatLng(b.getDouble(0), b.getDouble(1)))
+        }
+        e.timeSeries.addAll(parseTimeSeries(snapshot.getJSONArray("timeSeries")))
+        snapshot.getJSONArray("track").arrays().forEach {
+            e.track.add(TrackPoint(it.getLong(0), it.getDouble(1), it.getDouble(2), it.getDouble(3), it.optNumber(4), it.optNumber(5), it.optNumber(6)))
+        }
+        snapshot.getJSONArray("raw").arrays().forEach {
+            e.raw.add(RawFix(it.getLong(0), it.getDouble(1), it.getDouble(2), it.optNumber(3), it.optNumber(4), it.optNumber(5), it.optNumber(6)))
+        }
+        snapshot.getJSONArray("steps").arrays().forEach { e.steps.add(it.getLong(0) to it.getLong(1)) }
+        snapshot.getJSONArray("pauses").arrays().forEach { e.pauses.add(it.getLong(0) to it.getLong(1)) }
+        snapshot.getJSONArray("coachLog").arrays().forEach { e.coachLog.add(it.getLong(0) to it.getString(1)) }
+
+        st.optJSONObject("coach")?.let { c ->
+            e.coach?.restore(PaceCoach.State(
+                c.getDouble("scale"), c.getInt("eases"), c.getInt("misses"), c.getInt("seg"), c.getLong("segStart"),
+                c.getDouble("segStartDist"), c.getLong("nextCheckAt"),
+                c.getJSONArray("results").arrays().map { PaceCoach.Result(it.getInt(0), it.getDouble(1), it.optNumber(2)) },
+            ))
+        }
+        e.restore(
+            EngineState(
+                st.getDouble("nextMilestone"), st.getLong("splitStartMs"), st.getDouble("lastTimeSeriesDistance"),
+                st.getLong("lastTimeSeriesMs"), st.getLong("stepCount"), st.getInt("guidedIndex"),
+                st.getBoolean("guidedStarted"), st.getBoolean("guidedCompleted"),
+                if (st.isNull("ghostWon")) null else st.getBoolean("ghostWon"),
+                st.getDouble("cueDistance"), st.getDouble("cueGap"), st.getLong("cueAtMs"),
+                st.optNullableString("cueLeader"), st.getBoolean("ghostDoneAnnounced"),
+                st.getBoolean("everFixed"), st.getLong("pausedAt"),
+            ),
+            snapshot.getLong("elapsedMs"), snapshot.getLong("savedAt"),
+            snapshot.getDouble("distance"), snapshot.getDouble("estimatedDistance"),
+        )
+        return e
     }
 
     /** `[timeMs, distanceM, lat, lng, speed|null, bearing|null, altitude|null]`, rounded to keep runs small (same as script.js). */

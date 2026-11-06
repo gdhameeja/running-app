@@ -30,6 +30,7 @@ class Speaker(context: Context) {
         } else null
 
     private var ready = false
+    private var failed = false
     private val pending = mutableListOf<String>()
     private val inFlight = AtomicInteger(0)
     private val idleCallbacks = mutableListOf<() -> Unit>()
@@ -50,6 +51,7 @@ class Speaker(context: Context) {
 
     private fun onInit(status: Int) {
         ready = status == TextToSpeech.SUCCESS
+        failed = !ready
         if (ready) {
             tts.language = Locale.US
             tts.setAudioAttributes(attributes)
@@ -70,9 +72,11 @@ class Speaker(context: Context) {
     }
 
     fun speak(text: String) {
+        if (failed) return // no voice on this phone; don't queue what can never be said
         if (!ready) { pending += text; return }
         if (inFlight.getAndIncrement() == 0) requestFocus()
-        tts.speak(text, TextToSpeech.QUEUE_ADD, null, "u${nextId++}")
+        // Refused outright means no onDone is coming
+        if (tts.speak(text, TextToSpeech.QUEUE_ADD, null, "u${nextId++}") == TextToSpeech.ERROR) finished()
     }
 
     /** Runs [callback] once everything queued so far has been spoken. */

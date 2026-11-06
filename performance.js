@@ -2,7 +2,7 @@
 
 function calcPaceTrend(runs, limit = 20) {
     const sorted = runs
-        .filter(r => r.distance >= 500 && r.time > 0 && r.pace > 120 && r.pace < 1200)
+        .filter(r => !r.activity && r.distance >= 500 && r.time > 0 && r.pace > 120 && r.pace < 1200)
         .sort((a, b) => a.startTime - b.startTime)
         .slice(-limit);
     return sorted.map(r => ({
@@ -22,7 +22,7 @@ function calcWeeklyVolume(runs, weeks = 8, now = Date.now()) {
         start.setDate(monday.getDate() - 7 * i);
         const end = new Date(start);
         end.setDate(start.getDate() + 7);
-        const km = runs.filter(r => r.startTime >= start.getTime() && r.startTime < end.getTime())
+        const km = runs.filter(r => !r.activity && r.startTime >= start.getTime() && r.startTime < end.getTime())
             .reduce((sum, r) => sum + r.distance / 1000, 0);
         buckets.push({
             label: i === 0 ? "This week" : start.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
@@ -38,7 +38,7 @@ function findBestEfforts(runs, distancesKm) {
     const bests = {};
     distancesKm.forEach(km => {
         let best = null;
-        runs.forEach(r => {
+        runs.filter(r => !r.activity).forEach(r => {
             const e = RunAnalysis.runBestEffort(r, km * 1000);
             if (e && (!best || e.timeMs < best.timeMs)) best = Object.assign({ run: r }, e);
         });
@@ -62,18 +62,6 @@ function calcPersonalBests(runs) {
     return bests;
 }
 
-function estimateVO2max(runs) {
-    const candidates = runs.filter(r => {
-        const mins = r.time / 60;
-        return mins >= 10 && mins <= 15 && r.distance > 0;
-    });
-    if (candidates.length === 0) return null;
-    candidates.sort((a, b) => b.startTime - a.startTime);
-    const best = candidates[0];
-    const km12 = (best.distance / 1000) * (12 / (best.time / 60));
-    return Math.round((22.351 * km12 - 11.288) * 10) / 10;
-}
-
 function formatPace(totalSeconds) {
     // Round first, or 299.8 s would show as "4:60"
     const total = Math.round(totalSeconds);
@@ -86,7 +74,9 @@ let paceChart = null;
 let volumeChart = null;
 
 function renderStats() {
-    getAllRuns().then(runs => {
+    getAllRuns().then(all => {
+        // Not the run in progress or an interrupted one: only what you finished
+        const runs = all.filter(r => r.endTime);
         if (runs.length === 0) {
             document.getElementById("stats-empty").style.display = "block";
             document.getElementById("stats-content").style.display = "none";
@@ -99,6 +89,8 @@ function renderStats() {
         renderVolumeChart(runs);
         renderPersonalBests(runs);
         renderVO2max(runs);
+        document.getElementById("strength-stats").innerHTML = strengthStatsHtml(runs);
+        document.getElementById("walk-stats").innerHTML = walkStatsHtml(runs);
         renderCourseProgress();
     });
 }
@@ -206,7 +198,7 @@ function renderPersonalBests(runs) {
 }
 
 function renderVO2max(runs) {
-    const vo2 = estimateVO2max(runs);
+    const vo2 = RunAnalysis.vo2max(runs);
     const el = document.getElementById("vo2max-value");
     if (vo2) {
         el.textContent = vo2;
@@ -257,4 +249,8 @@ function renderCourseProgress() {
             container.appendChild(div);
         });
     });
+}
+
+if (typeof module !== "undefined") {
+    module.exports = { calcPaceTrend, calcWeeklyVolume, findBestEfforts, calcPersonalBests, formatPace, getGhostDistanceAtTime, getGhostTimeAtDistance, getGhostPositionAtTime };
 }

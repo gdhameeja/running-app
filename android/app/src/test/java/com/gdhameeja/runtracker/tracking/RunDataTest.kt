@@ -78,4 +78,138 @@ class RunDataTest {
         while (t <= 30_000) { said += c.tick(t, t / 400.0, cadence = 150.0); t += 500 }
         assertTrue(said.single().startsWith("Quicker, lighter steps"))
     }
+
+    // ─── Carrying on after the app was killed ────────────────────────────────
+
+    /** Saves to JSON text and back, as the snapshot file does. */
+    private fun reload(e: RunEngine, savedAt: Long): RunEngine =
+        RunJson.restore(org.json.JSONObject(RunJson.snapshot(e, savedAt).toString()), e.config)
+
+    private fun runFor(e: RunEngine, from: Int, to: Int, step: Double = 3.0) {
+        for (s in from until to) {
+            e.onLocation(52.0 + s * step / metresPerDegLat, 4.0, 5.0, t0 + s * 1000L, speed = step, bearing = 0.0, altitude = 10.0)
+            e.onSteps(50_000L + s * 3, t0 + s * 1000L)
+            e.tick(t0 + s * 1000L)
+        }
+    }
+
+    @Test
+    fun aRestoredRunHasEverythingItHadAndComesBackPaused() {
+        val e = RunEngine(RunConfig(runId = 7), t0)
+        runFor(e, 0, 400)
+        val saved = t0 + 400_000
+        val r = reload(e, saved)
+        assertEquals(RunEngine.Status.PAUSED, r.status)
+        assertEquals(7L, r.config.runId)
+        assertEquals(e.totalDistance, r.totalDistance, 0.0)
+        assertEquals(e.elapsedMs(saved), r.elapsedMs(saved + 600_000))
+        assertEquals(e.track.size, r.track.size)
+        assertEquals(e.raw.size, r.raw.size)
+        assertEquals(e.timeSeries.size, r.timeSeries.size)
+        assertEquals(e.steps, r.steps)
+        assertEquals(e.pointCount, r.pointCount)
+        assertEquals(e.coachLog, r.coachLog)
+        assertEquals(e.track.last().altitude!!, r.track.last().altitude!!, 0.0)
+    }
+
+    @Test
+    fun timeAwayCountsAsAPauseAndNoDistanceIsInvented() {
+        val e = RunEngine(RunConfig(runId = 7), t0)
+        runFor(e, 0, 400)
+        val saved = t0 + 400_000
+        val r = reload(e, saved)
+        val before = r.totalDistance
+        val back = saved + 600_000 // ten minutes later, 2 km away
+        r.resume(back)
+        assertEquals(1, r.pauses.size)
+        assertEquals(400_000L, r.pauses[0].first)
+        assertEquals(600_000L, r.pauses[0].second)
+        assertEquals(400_000L, r.elapsedMs(back))
+        r.onLocation(52.0 + 2000 / metresPerDegLat, 4.0, 5.0, back + 1000, 3.0, 0.0)
+        assertEquals(before, r.totalDistance, 0.0)
+        assertEquals(2, r.pathSegments.size)
+        r.onLocation(52.0 + 2003 / metresPerDegLat, 4.0, 5.0, back + 2000, 3.0, 0.0)
+        r.onLocation(52.0 + 2006 / metresPerDegLat, 4.0, 5.0, back + 3000, 3.0, 0.0)
+        assertTrue(r.totalDistance > before && r.totalDistance < before + 10)
+    }
+
+    @Test
+    fun theNextKilometreAndStepsCarryOnFromWhereTheyWere() {
+        val e = RunEngine(RunConfig(runId = 7), t0)
+        runFor(e, 0, 300) // ~900 m
+        val saved = t0 + 300_000
+        val r = reload(e, saved)
+        val back = saved + 60_000
+        r.resume(back)
+        val said = mutableListOf<String>()
+        for (s in 1..50) said += r.onLocation(52.0 + (900 + s * 3.0) / metresPerDegLat, 4.0, 5.0, back + s * 1000L, 3.0, 0.0)
+        assertEquals(said.toString(), 1, said.count { it.contains("completed 1 kilometer") })
+        assertTrue(said.toString(), said.none { it.contains("completed 2") })
+        val stepsBefore = e.state().stepCount // ahead of the last 5-second sample
+        r.onSteps(900_000, back + 60_000) // new baseline after the restart
+        r.onSteps(900_030, back + 70_000)
+        assertEquals(stepsBefore + 30, r.steps.last().second)
+    }
+
+    @Test
+    fun aRunPausedBeforeTheKillKeepsItsOwnPauseStart() {
+        val e = RunEngine(RunConfig(runId = 7), t0)
+        runFor(e, 0, 100)
+        val pausedAt = t0 + 100_000
+        e.pause(pausedAt)
+        val r = reload(e, pausedAt + 300_000)
+        r.resume(pausedAt + 500_000)
+        assertEquals(500_000L, r.pauses[0].second)
+        assertEquals(100_000L, r.elapsedMs(pausedAt + 500_000))
+    }
+
+    @Test
+    fun aGuidedRunCarriesOnInTheSameSegmentWithItsCoach() {
+        val segs = listOf(
+            GuidedSegment("run", 120, "x", role = "cruise", pace = 300.0),
+            GuidedSegment("run", 120, "x", role = "push", pace = 280.0),
+            GuidedSegment("run", 120, "x", role = "cruise", pace = 300.0),
+        )
+        val e = RunEngine(RunConfig(runId = 7, guided = segs), t0)
+        runFor(e, 0, 200) // into the second segment
+        assertEquals(1, e.guidedIndex)
+        val saved = t0 + 200_000
+        val r = reload(e, saved)
+        assertEquals(1, r.guidedIndex)
+        assertEquals(1, r.coach!!.seg)
+        assertEquals(e.coach!!.results.size, r.coach!!.results.size)
+        assertEquals(e.guidedRemainingMs(saved), r.guidedRemainingMs(saved + 100_000))
+        val back = saved + 100_000
+        r.resume(back)
+        r.tick(back + 1000)
+        assertEquals("Doesn't restart the workout", 1, r.guidedIndex)
+        val spoken = mutableListOf<String>()
+        var t = back + 1000
+        while (r.status != RunEngine.Status.FINISHED && t < back + 400_000) { t += 500; spoken += r.tick(t) }
+        assertTrue(spoken.toString(), spoken.contains("Workout complete! Great job!"))
+        assertTrue(r.guidedCompleted)
+    }
+
+    @Test
+    fun aGhostRaceCarriesOnAndCanStillBeWon() {
+        val ghost = GhostConfig(1000.0, listOf(TimePoint(0.0, 0), TimePoint(1000.0, 500_000)))
+        val e = RunEngine(RunConfig(runId = 7, ghost = ghost), t0)
+        runFor(e, 0, 100)
+        val r = reload(e, t0 + 100_000)
+        assertEquals(1000.0, r.config.ghost!!.targetMeters, 0.0)
+        assertNull(r.ghostWon)
+    }
+
+    @Test
+    fun finishingARestoredRunGivesTheWholeRun() {
+        val e = RunEngine(RunConfig(runId = 7), t0)
+        runFor(e, 0, 100)
+        val saved = t0 + 100_000
+        val r = reload(e, saved)
+        r.finish(saved + 50_000)
+        assertEquals(RunEngine.Status.FINISHED, r.status)
+        assertEquals(100_000L, r.elapsedMs(saved + 50_000))
+        assertEquals(50_000L, r.pauses[0].second)
+        assertEquals(e.track.size, r.track.size)
+    }
 }

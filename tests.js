@@ -25,80 +25,11 @@ function assertApprox(actual, expected, tolerance, name) {
     }
 }
 
-// ─── Functions under test (extracted from source) ─────────────────────────────
+// ─── The real code under test ─────────────────────────────────────────────────
 
-function getDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371000;
-    const dLat = (lat2 - lat1) * (Math.PI / 180);
-    const dLon = (lon2 - lon1) * (Math.PI / 180);
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
-
-function getGhostDistanceAtTime(timeSeries, elapsedMs) {
-    if (!timeSeries || timeSeries.length === 0) return 0;
-    for (let i = 0; i < timeSeries.length; i++) {
-        if (timeSeries[i].time >= elapsedMs) {
-            if (i === 0) {
-                return timeSeries[0].distance > 0
-                    ? (elapsedMs / timeSeries[0].time) * timeSeries[0].distance : 0;
-            }
-            const prev = timeSeries[i - 1], next = timeSeries[i];
-            const ratio = (elapsedMs - prev.time) / (next.time - prev.time);
-            return prev.distance + ratio * (next.distance - prev.distance);
-        }
-    }
-    return timeSeries[timeSeries.length - 1].distance;
-}
-
-function getGhostTimeAtDistance(timeSeries, distance) {
-    if (!timeSeries || timeSeries.length === 0) return null;
-    for (let i = 0; i < timeSeries.length; i++) {
-        if (timeSeries[i].distance >= distance) {
-            if (i === 0) {
-                return timeSeries[0].distance > 0
-                    ? (distance / timeSeries[0].distance) * timeSeries[0].time : timeSeries[0].time;
-            }
-            const prev = timeSeries[i - 1], next = timeSeries[i];
-            const ratio = (distance - prev.distance) / (next.distance - prev.distance);
-            return prev.time + ratio * (next.time - prev.time);
-        }
-    }
-    return null;
-}
-
-function getGhostPositionAtTime(timeSeries, elapsedMs) {
-    if (!timeSeries || timeSeries.length === 0) return null;
-    const withCoords = timeSeries.filter(p => p.lat != null && p.lng != null);
-    if (withCoords.length === 0) return null;
-    for (let i = 0; i < withCoords.length; i++) {
-        if (withCoords[i].time >= elapsedMs) {
-            if (i === 0) return [withCoords[0].lat, withCoords[0].lng];
-            const prev = withCoords[i - 1], next = withCoords[i];
-            const ratio = (elapsedMs - prev.time) / (next.time - prev.time);
-            return [
-                prev.lat + ratio * (next.lat - prev.lat),
-                prev.lng + ratio * (next.lng - prev.lng)
-            ];
-        }
-    }
-    const last = withCoords[withCoords.length - 1];
-    return [last.lat, last.lng];
-}
-
-function calcPaceTrend(runs, limit = 20) {
-    const sorted = runs
-        .filter(r => r.distance >= 500 && r.time > 0 && r.pace > 120 && r.pace < 1200)
-        .sort((a, b) => a.startTime - b.startTime)
-        .slice(-limit);
-    return sorted.map(r => ({
-        date: new Date(r.startTime).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-        pace: r.pace / 60
-    }));
-}
+global.RunAnalysis = require("./analysis.js");
+const { getDistance, classifyFix, formatTime, formatDuration } = require("./run-core.js");
+const { calcPaceTrend, formatPace, getGhostDistanceAtTime, getGhostTimeAtDistance, getGhostPositionAtTime } = require("./performance.js");
 
 // ─── Pace Calculation Tests ──────────────────────────────────────────────────
 
@@ -303,18 +234,6 @@ console.log("\n=== Haversine Distance Tests ===\n");
 
 console.log("\n=== GPS Fix Classification Tests ===\n");
 
-const GAP_THRESHOLD_MS = 10000;
-const MAX_SPEED_MPS = 12.5;
-
-function classifyFix(prev, curr) {
-    const dist = getDistance(prev.lat, prev.lon, curr.lat, curr.lon);
-    const dt = (curr.time - prev.time) / 1000;
-    const isGap = curr.time - prev.lastRawTime > GAP_THRESHOLD_MS;
-    if (dt > 0 && dist / dt > MAX_SPEED_MPS) return { action: "reject", dist, dt, isGap };
-    if (!isGap && dist < 3) return { action: "skip", dist, dt, isGap };
-    return { action: "accept", dist, dt, isGap };
-}
-
 // ~0.000009 deg latitude per metre
 (function testNormalFix() {
     const r = classifyFix({ lat: 12.97, lon: 77.59, time: 0, lastRawTime: 0 },
@@ -492,7 +411,7 @@ const M_N = 1 / 111195; // degrees latitude per metre
 
 console.log("\n=== Run Analysis Tests ===\n");
 
-const RA = require("./analysis.js");
+const RA = RunAnalysis;
 const M_LAT = 1 / 111195;
 
 // A run north at 4 m/s (one fix per second) with a 30 s stop at 500 m
@@ -773,6 +692,15 @@ const GpsFilter = require("./gps-filter.js");
 
 // ─── Tune-In: pace coach and planner ─────────────────────────────────────────
 
+(function testMovingWithNoBearing() {
+    // First fix after a pause: Doppler speed, but no bearing yet
+    const f = new GpsFilter();
+    const t0 = 1000000;
+    let est;
+    for (let i = 0; i <= 2; i++) est = f.update(28.6 + i * 3 / 111195, 77.2, 5, t0 + i * 1000, 3, null);
+    assert(est.speed > 1.5, `Moving at 3 m/s with no bearing: 2 s in, the filter has noticed (${est.speed.toFixed(2)} m/s)`);
+})();
+
 console.log("\n=== Tune-In Tests ===\n");
 
 const { PaceCoach, TuneInPlanner, spokenPace } = require("./coach.js");
@@ -1028,21 +956,596 @@ console.log("\n=== Run Data Tests ===\n");
     assert(Enrich.suggest([], [], now).feel === null, "No watch data: no suggestion");
 })();
 
+const weatherTest = (async function testWeatherNearMidnight() {
+    global.RunAnalysis = RA;
+    const Enrich = require("./enrich.js");
+    // Answers like Open-Meteo: only the hours of the day(s) that were asked for
+    const realFetch = global.fetch;
+    global.fetch = async (url) => {
+        const day = /start_date=([\d-]+)/.exec(url)[1];
+        const time = Array.from({ length: 24 }, (_, h) => `${day}T${String(h).padStart(2, "0")}:00`);
+        const col = (v) => time.map(() => v);
+        return { ok: true, json: async () => ({ hourly: {
+            time, temperature_2m: col(20), apparent_temperature: col(21), relative_humidity_2m: col(50),
+            dew_point_2m: col(9), wind_speed_10m: col(5), wind_direction_10m: col(90), precipitation: col(0),
+        } }) };
+    };
+    const runAt = (startTime) => ({ startTime, distance: 1000, track: [[0, 0, 28.6, 77.2], [300000, 1000, 28.609, 77.2]] });
+    // 23:40 GMT is 05:10 in India: rounds up to the next day's 00:00
+    const late = await Enrich.weather(runAt(Date.UTC(2026, 9, 20, 23, 40)));
+    assert(late && late.tempC === 20 && late.at === "2026-10-21T00:00Z", "A run at 23:40 GMT gets the next day's midnight weather");
+    const noon = await Enrich.weather(runAt(Date.UTC(2026, 9, 20, 12, 10)));
+    assert(noon && noon.at === "2026-10-20T12:00Z", "A midday run gets its own hour");
+    global.fetch = realFetch;
+})();
+
+(function testAppStartsOffline() {
+    const fs = require("fs");
+    const html = fs.readFileSync("./index.html", "utf8");
+    const tags = html.match(/<(script|link)\b[^>]*>/g);
+    assert(!tags.some(t => /(src|href)="(https?:)?\/\//.test(t)), "index.html loads nothing from the network (no signal must still start)");
+    const local = tags.map(t => /(?:src|href)="([^"]+)"/.exec(t)[1]);
+    assert(local.every(f => fs.existsSync(f)), "Everything index.html loads is in the repo");
+    const build = fs.readFileSync("./scripts/build-web.js", "utf8");
+    assert(local.every(f => f.startsWith("vendor/") ? /"vendor"/.test(build) : build.includes(`"${f}"`)), "The build copies everything index.html loads");
+})();
+
 // ─── Pace Formatting ─────────────────────────────────────────────────────────
 
 console.log("\n=== Pace Formatting Tests ===\n");
 
-function formatPace(totalSeconds) {
-    const total = Math.round(totalSeconds);
-    const mins = Math.floor(total / 60);
-    const secs = total % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-}
-
 assert(formatPace(299.8) === "5:00", "299.8 s rounds up to 5:00, not 4:60");
 assert(formatPace(299.4) === "4:59" && formatPace(61) === "1:01", "Ordinary paces");
 
+// ─── Editing a run, VO2max, GPS warnings ─────────────────────────────────────
+
+console.log("\n=== Run Editing Tests ===\n");
+
+// A run of `n` fixes, 3 m and 1 s apart, with a 60 s pause after 10 s
+function sampleRun(n = 600, startTime = Date.UTC(2026, 9, 1, 6)) {
+    const track = [], raw = [];
+    for (let i = 0; i < n; i++) {
+        track.push([i * 1000, i * 3, 28.6 + i * 3 / 111195, 77.2, 3, 0, 200]);
+        raw.push([i * 1000, 28.6 + i * 3 / 111195, 77.2, 5, 200, 3, 0]);
+    }
+    const distance = (n - 1) * 3, time = n - 1;
+    return {
+        runId: startTime, startTime, endTime: startTime + time * 1000 + 60000, distance, time, pace: time / (distance / 1000),
+        track, raw, pathSegments: [track.slice(0, 10).map(p => [p[2], p[3]]), track.slice(10).map(p => [p[2], p[3]])],
+        timeSeries: track.filter(p => p[1] % 99 === 0 && p[1] > 0).map(p => ({ distance: p[1], time: p[0], lat: p[2], lng: p[3], pace: 333 })),
+        pauses: [[10000, 60000]], steps: [[0, 0], [300000, 900], [500000, 1500]], coachLog: [[1000, "go"], [500000, "late"]],
+        hr: { samples: [[1000, 120], [100000, 140], [550000, 190]], avg: 150, max: 190 },
+        elevation: { points: [[0, 200], [1000, 210]], gain: 10, loss: 0 }, estimatedDistance: 1500,
+    };
+}
+
+(function testTrimRun() {
+    const run = sampleRun();
+    const t = RA_TRIM(run, 300500);
+    assert(t.track.length === 301 && t.distance === 900 && t.time === 300, "Trim: cuts at the last fix before the mark");
+    assertApprox(t.pace, 300 / 0.9, 0.01, "Trim: pace worked out again");
+    assert(t.endTime === run.startTime + 360000, "Trim: end time counts the pause before the cut");
+    assert(t.raw.length === 301 && t.steps.length === 2 && t.coachLog.length === 1, "Trim: raw fixes, steps and spoken cues cut too");
+    assert(t.pathSegments.length === 2 && t.pathSegments.flat().length === 301, "Trim: the drawn path keeps its segments and matches the track");
+    assert(t.hr.samples.length === 2 && t.hr.max === 140 && t.hr.avg === 130, "Trim: heart rate worked out from what's left");
+    assert(!t.elevation && !t.derived, "Trim: the old hill profile and summary go");
+    assert(t.estimatedDistance === 900, "Trim: estimated distance can't exceed the distance");
+    assert(run.track.length === 600 && run.distance === 1797, "Trim: the run passed in isn't changed");
+    assert(RA_TRIM(run, 600000) === null, "Trim past the end: nothing to do");
+    assert(RA_TRIM(run, 0) === null, "Trim to nothing: refused");
+    assert(RA_TRIM({ timeSeries: [] }, 100) === null, "Old run without a track: can't be trimmed");
+})();
+
+function RA_TRIM(run, ms) { return RunAnalysis.trimRun(run, ms); }
+
+(function testVo2max() {
+    const now = Date.UTC(2026, 9, 1);
+    const run = (km, min, daysAgo = 3) => ({ endTime: 1, startTime: now - daysAgo * 86400000, distance: km * 1000, time: min * 60, pace: min * 60 / km });
+    assertApprox(RunAnalysis.vo2max([run(5, 20)], now), 49.8, 0.3, "5K in 20:00: VO2max about 50 (Daniels)");
+    assertApprox(RunAnalysis.vo2max([run(5, 30)], now), 30.8, 0.4, "5K in 30:00: VO2max about 31");
+    assert(RunAnalysis.vo2max([run(2, 24)], now) === null, "A 12-minute walk says nothing about VO2max");
+    assert(RunAnalysis.vo2max([run(5, 20, 30), run(1.5, 12, 1)], now) >= 49, "A recent easy jog doesn't drag it down");
+    assert(RunAnalysis.vo2max([], now) === null, "No runs: none");
+})();
+
+(function testGpsWatch() {
+    const { GpsWatch } = require("./gps-filter.js");
+    const w = new GpsWatch(0);
+    assert(w.tick(59000) === null, "GPS: a minute's grace to lock on at the start");
+    assert(/Still no GPS/.test(w.tick(60000)) && w.lost, "GPS: no first fix after a minute: says so");
+    assert(w.tick(61000) === null, "GPS: says it once");
+    assert(w.fix(62000) === "GPS is back.", "GPS: says when it's back");
+    assert(w.tick(91000) === null, "GPS: 29 s without a fix: nothing yet");
+    assert(/signal lost/.test(w.tick(92000)), "GPS: 30 s without a fix: warns");
+    assert(w.tick(391000) === null && /signal lost/.test(w.tick(392000)), "GPS: reminds every 5 minutes");
+    w.reset(400000);
+    assert(!w.lost && w.tick(420000) === null, "GPS: resuming starts the wait over");
+    assert(w.fix(421000) === null, "GPS: a normal fix says nothing");
+})();
+
+// ─── Gym and walks ───────────────────────────────────────────────────────────
+
+console.log("\n=== Strength Planner Tests ===\n");
+
+const SP = require("./strength-plan.js");
+const benchEx = { id: "bench", name: "Bench press", sets: 3, repLow: 8, repHigh: 12, stepKg: 2.5, restSec: 120 };
+const pushEx = { id: "pushup", name: "Push-up", sets: 3, repLow: 8, repHigh: 12, stepKg: 0, restSec: 90 };
+
+// A session where you did `done` reps on each set against `target`
+function gym(day, weight, target, done, ex = benchEx) {
+    return { activity: "strength", startTime: day * 86400000, endTime: day * 86400000 + 1,
+        exercises: [{ id: ex.id, name: ex.name, sets: done.map(reps => ({ weight, reps, target })) }] };
+}
+
+(function testStrengthTargets() {
+    let t = SP.target(benchEx, []);
+    assert(t.action === "first" && t.weight === null && t.reps === 8 && t.sets === 3, "First time: you pick the weight, bottom of the rep range");
+    assert(SP.target(pushEx, []).weight === 0, "Bodyweight first time: no weight to pick");
+
+    t = SP.target(benchEx, [gym(1, 60, 8, [8, 8, 9])]);
+    assert(t.action === "rep" && t.weight === 60 && t.reps === 9, "Hit every set: one more rep, same weight");
+    t = SP.target(benchEx, [gym(1, 60, 12, [12, 12, 12])]);
+    assert(t.action === "step" && t.weight === 62.5 && t.reps === 8, "Hit the top of the range: add weight, back to the bottom");
+    t = SP.target({ ...benchEx, stepKg: 5 }, [gym(1, 100, 12, [12, 12, 12])]);
+    assert(t.weight === 105, "Steps by the exercise's own increment");
+    t = SP.target(pushEx, [gym(1, 0, 12, [12, 12, 12], pushEx)]);
+    assert(t.action === "rep" && t.reps === 13 && t.weight === 0, "Bodyweight: reps keep climbing");
+
+    t = SP.target(benchEx, [gym(1, 60, 10, [10, 9, 8])]);
+    assert(t.action === "hold" && t.weight === 60 && t.reps === 10, "Missed once: same target again");
+    t = SP.target(benchEx, [gym(1, 60, 10, [10, 10])]);
+    assert(t.action === "hold", "Fewer sets than planned counts as a miss");
+    t = SP.target(benchEx, [gym(1, 60, 10, [10, 9, 8]), gym(2, 60, 10, [10, 8, 8])]);
+    assert(t.action === "back" && t.weight === 55 && t.reps === 8, "Missed twice: 10% off, rounded to a real weight, bottom of the range");
+    t = SP.target(benchEx, [gym(1, 60, 10, [9, 9, 9]), gym(2, 60, 10, [9, 9, 9]), gym(3, 55, 8, [7, 7, 7])]);
+    assert(t.action === "hold" && t.weight === 55, "A miss after backing off starts counting again at the new weight");
+    t = SP.target(benchEx, [gym(1, 60, 10, [10, 9, 8]), gym(2, 60, 10, [10, 10, 10]), gym(3, 60, 11, [11, 10, 10])]);
+    assert(t.action === "hold", "Misses have to be in a row");
+    t = SP.target(pushEx, [gym(1, 0, 10, [8, 8, 8], pushEx), gym(2, 0, 10, [8, 8, 8], pushEx)]);
+    assert(t.action === "back" && t.reps === 8, "Bodyweight missed twice: fewer reps");
+
+    t = SP.target(benchEx, [gym(1, 60, 12, [12, 12, 12])], "tired");
+    assert(t.action === "hold" && t.weight === 60 && t.reps === 12, "Tired today: no step up");
+    t = SP.target(benchEx, [gym(1, 60, 8, [8, 8, 8]), { activity: "strength", startTime: 9e12, endTime: null, exercises: [] }, { startTime: 9e12, endTime: 1, distance: 5000 }]);
+    assert(t.reps === 9, "Unfinished sessions and runs don't affect suggestions");
+    t = SP.target(benchEx, [gym(1, 60, 8, [8, 8, 8]), gym(2, 40, 8, [8, 8, 8], { id: "row", name: "Row" })]);
+    assert(t.weight === 60, "Other exercises don't affect this one");
+})();
+
+(function testStrengthVoiceAndNumbers() {
+    assert(SP.spokenSet("Bench press", 8, 60) === "Bench press. 8 reps at 60 kilos.", "Spoken set with weight");
+    assert(SP.spokenSet("Push-up", 12, 0) === "Push-up. 12 reps.", "Spoken set, bodyweight");
+    const cues = SP.restCues(90, "Squat. 8 reps at 80 kilos.");
+    assert(cues.length === 3 && cues[0].inMs === 0 && /Rest 90 seconds/.test(cues[0].text) && /Next: Squat/.test(cues[0].text), "Rest: says how long and what's next");
+    assert(cues[1].inMs === 80000 && cues[1].text === "10 seconds.", "Rest: warns at 10 seconds");
+    assert(cues[2].inMs === 90000 && /^Go\. Squat/.test(cues[2].text), "Rest: calls the next set");
+    assert(SP.restCues(15, "x").length === 2, "Short rest: no 10-second warning");
+
+    assertApprox(SP.oneRepMax(100, 10), 133.3, 0.1, "Estimated 1RM (Epley)");
+    assert(SP.oneRepMax(100, 1) === 100, "A single is your 1RM");
+    assert(SP.volume(gym(1, 60, 8, [8, 8, 8])) === 1440, "Volume: weight times reps");
+    const p = SP.progress([gym(1, 60, 8, [8, 8, 8]), gym(2, 70, 8, [8, 8, 7])]);
+    assert(p.length === 1 && p[0].sessions === 2 && p[0].weight === 70 && p[0].reps === 8 && p[0].change > 0, "Progress: latest lift and gain per exercise");
+    const c = SP.custom("  Cable Fly! ", { weights: true });
+    assert(c.id === "cable-fly" && c.name === "Cable Fly!" && c.stepKg === 2.5, "Your own exercise with weights");
+    const own = SP.custom("Bear crawl");
+    assert(own.stepKg === 0 && !own.ladder && !own.unit && SP.target(own, []).weight === 0, "Your own exercise is bodyweight by default");
+    const ownHold = SP.custom("Dead hang", { timed: true });
+    assert(ownHold.unit === "s" && SP.target(ownHold, []).reps === 20, "Your own timed hold");
+    assert(SP.DEFAULT_ROUTINES.every(r => r.exercises.every(Boolean)), "Starter workouts all use real exercises");
+    assert(SP.DEFAULT_ROUTINES.every(r => r.exercises.every(e => e.group === "No equipment")), "Starter workouts need no equipment at all");
+    assert(SP.PRESETS.every(p => SP.GROUPS.includes(p.group)) && new Set(SP.PRESETS.map(p => p.id)).size === SP.PRESETS.length, "Every preset has a group and its own id");
+    assert(SP.PRESETS.filter(p => p.ladder).every(p => p.level < p.ladder.length), "Every ladder starts on a real rung");
+})();
+
+(function testBodyweightLadders() {
+    const push = SP.PRESETS.find(p => p.id === "push");
+    const plank = SP.PRESETS.find(p => p.id === "plank");
+    const on = (day, level, target, done, ex = push) => {
+        const s = gym(day, 0, target, done, ex);
+        s.exercises[0].level = level;
+        s.exercises[0].unit = ex.unit;
+        return s;
+    };
+    let t = SP.target(push, []);
+    assert(t.variation === "Push-up" && t.reps === 6 && t.level === 3 && t.weight === 0, "First time: a sensible rung, no weight to pick");
+
+    t = SP.target(push, [on(1, 3, 6, [6, 6, 7])]);
+    assert(t.action === "rep" && t.reps === 7 && t.variation === "Push-up", "Hit it: one more rep on the same variation");
+    t = SP.target(push, [on(1, 3, 6, [10, 9, 9])]);
+    assert(t.reps === 10, "Did more than asked: builds on what you did, not the old target");
+    t = SP.target(push, [on(1, 3, 6, [20, 15, 14])]);
+    assert(t.action === "harder" && t.variation === "Diamond push-up" && t.reps === 6, "Far too easy: straight on to the next variation");
+    t = SP.target(push, [on(1, 3, 12, [12, 12, 12])]);
+    assert(t.action === "harder" && t.level === 4 && t.reps === 6 && /Mastered Push-up/.test(t.why), "Top of the range: next variation, bottom of the range");
+    t = SP.target(push, [on(1, 3, 11, [12, 12, 11])]);
+    assert(t.action === "rep" && t.level === 3 && t.reps === 12, "All sets must reach the top before moving up");
+    t = SP.target(push, [on(1, 5, 12, [12, 12, 12])]);
+    assert(t.action === "rep" && t.level === 5 && t.reps === 13, "Top of the ladder: reps keep climbing");
+
+    t = SP.target(push, [on(1, 3, 8, [8, 7, 6])]);
+    assert(t.action === "hold" && t.reps === 8 && t.level === 3, "Missed once: same again");
+    t = SP.target(push, [on(1, 3, 9, [8, 7, 6]), on(2, 3, 9, [9, 7, 6])]);
+    assert(t.action === "back" && t.reps === 7 && t.level === 3, "Missed twice: fewer reps first");
+    t = SP.target(push, [on(1, 3, 6, [5, 4, 4]), on(2, 3, 6, [6, 5, 4])]);
+    assert(t.action === "easier" && t.variation === "Knee push-up" && t.reps === 9, "Missed twice at the bottom of the range: the variation below, mid-range");
+    t = SP.target(push, [on(1, 0, 6, [4, 4, 4]), on(2, 0, 6, [4, 4, 3])]);
+    assert(t.level === 0 && t.reps === 6, "Bottom of the ladder: nowhere easier to go");
+    t = SP.target(push, [on(1, 3, 6, [5, 5, 5]), on(2, 4, 6, [5, 5, 5])]);
+    assert(t.action === "hold", "Misses on different variations don't add up");
+    t = SP.target(push, [on(1, 3, 12, [12, 12, 12])], "tired");
+    assert(t.action === "hold" && t.level === 3, "Tired today: stay on this variation");
+
+    // Timed holds
+    t = SP.target(plank, []);
+    assert(t.unit === "s" && t.reps === 20 && t.variation === "Plank", "Holds start at the bottom of their range, in seconds");
+    t = SP.target(plank, [on(1, 1, 20, [20, 20, 20], plank)]);
+    assert(t.reps === 25 && /5 more seconds/.test(t.why), "Hold hit: 5 seconds more");
+    t = SP.target(plank, [on(1, 1, 60, [60, 60, 60], plank)]);
+    assert(t.variation === "Long-lever plank" && t.reps === 20, "A 60 s hold on every set: next variation");
+    t = SP.target(plank, [on(1, 1, 40, [40, 30, 25], plank), on(2, 1, 40, [38, 30, 25], plank)]);
+    assert(t.action === "back" && t.reps === 30, "Hold missed twice: 10 seconds less");
+
+    // Choosing by hand
+    let chosen = SP.change(push, SP.target(push, []), -1);
+    assert(chosen.variation === "Knee push-up" && chosen.reps === 6 && chosen.why === "", "Easier: one rung down");
+    assert(SP.change(push, { level: 5 }, 1) === null && SP.change(push, { level: 0 }, -1) === null, "No rung past either end");
+    assert(SP.change(SP.custom("Bear crawl"), { level: 0 }, 1) === null, "No ladder, nothing to change");
+    const later = SP.target(push, [on(1, chosen.level, 6, [7, 7, 7])]);
+    assert(later.variation === "Knee push-up" && later.reps === 8, "Your choice is remembered next time");
+
+    // Voice
+    assert(SP.spokenSet("Plank", 30, 0, "s") === "Plank. 30 seconds.", "Spoken hold");
+    const h = SP.holdCues(30, "Plank");
+    assert(h[0].text === "Plank. 30 seconds. Go." && h[1].inMs === 20000 && h[2].inMs === 30000 && h[2].text === "Stop.", "A hold is counted by voice");
+    assert(SP.holdCues(15, "Plank").length === 2, "Short hold: no 10-second warning");
+    assert(SP.after(h, 1000)[2].inMs === 31000, "Cues chain after a hold");
+    assert(/Tap start/.test(SP.restCues(60, "Plank. 30 seconds.", { nextIsHold: true }).pop().text), "A hold after a rest waits for your tap");
+    assert(SP.totalReps({ exercises: [{ sets: [{ reps: 10 }] }, { unit: "s", sets: [{ reps: 30 }] }] }) === 10, "Seconds don't count as reps");
+    assert(SP.totalHeld({ exercises: [{ sets: [{ reps: 10 }] }, { unit: "s", sets: [{ reps: 30 }, { reps: 25 }] }] }) === 55, "Seconds held add up");
+    const home = SP.DEFAULT_ROUTINES.flatMap(r => r.exercises.map(e => e.id));
+    assert(home.includes("packrow") && !home.includes("pull") && !home.includes("row"), "Pulling with no bar: starter workouts use a backpack");
+
+    // What Stats shows
+    const p = SP.progress([Object.assign(on(1, 3, 6, [6, 6, 6]), {}), (() => { const s = on(2, 4, 6, [6, 6, 6]); Object.assign(s.exercises[0], { variation: "Diamond push-up", levels: 6 }); return s; })()]);
+    assert(p[0].variation === "Diamond push-up" && p[0].level === 4 && p[0].levels === 6 && p[0].sessions === 2, "Progress shows your latest variation and step");
+})();
+
+(function testOtherActivitiesStayOutOfRunningNumbers() {
+    const { calcWeeklyVolume, findBestEfforts } = require("./performance.js");
+    const now = Date.UTC(2026, 9, 1, 12);
+    const walk = Object.assign(sampleRun(900, now - 86400000), { activity: "walk" });
+    const session = gym(now / 86400000 - 1, 60, 8, [8, 8, 8]);
+    Object.assign(session, { distance: 0, time: 1800, pace: 0 });
+    const others = [walk, session];
+    assert(calcPaceTrend(others).length === 0, "Walks and gym sessions aren't in the pace trend");
+    assert(findBestEfforts(others, [1])[1] === null, "...or your PBs");
+    assert(calcWeeklyVolume(others, 2, now).every(w => w.km === 0), "...or weekly running volume");
+    assert(RunAnalysis.fiveKPace(others, now) === null && RunAnalysis.vo2max(others, now) === null, "...or your 5K prediction and VO2max");
+    assert(RunAnalysis.groupRoutes(others).length === 0, "...or your routes");
+    const fast = Array.from({ length: 5 }, (_, i) => Object.assign(sampleRun(900, now - (i + 1) * 86400000), { activity: "walk" }));
+    assert(TuneInPlanner.plan(fast, now).ready === false, "...or Tune-In's learning");
+})();
+
+// ─── Storage and sync: real IndexedDB (in memory), a fake Supabase ───────────
+
+require("fake-indexeddb/auto");
+const { IDBFactory } = require("fake-indexeddb");
+const Store = require("./run-store.js");
+
+function fakeLocalStorage() {
+    const m = new Map();
+    return { getItem: k => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) };
+}
+
+// What sync.js expects around it. Each phone is its own database and settings.
+Object.assign(global, Store, {
+    isRunLive: () => false, currentRunId: null, renderHomeRecent() {}, renderHistory() {}, showToast() {}, escapeHtml: s => s,
+    Enrich: { healthState: () => ({}), init() {} },
+    NativeTracker: { available: false },
+    document: { getElementById: id => id === "tab-history" ? { classList: { contains: () => false } } : null, addEventListener() {}, createElement: () => ({ click() {} }) },
+});
+Object.defineProperty(global, "db", { get: Store.database });
+const CloudSync = require("./sync.js");
+
+function fakeServer({ refuseOlder = false } = {}) {
+    const srv = { runs: new Map(), course_progress: new Map(), clock: 0, posts: [], failAfterPosts: null };
+    const cols = { runs: "run_id", course_progress: "progress_id" };
+    const reply = (status, body) => ({ ok: status < 400, status, text: async () => body == null ? "" : JSON.stringify(body) });
+    srv.fetch = async (url, options = {}) => {
+        const u = new URL(url), [, , , table] = u.pathname.split("/");
+        if (u.pathname.endsWith("rpc/heartbeat")) return reply(200, "x");
+        const col = cols[table], rows = srv[table];
+        if (options.method === "POST") {
+            if (srv.failAfterPosts != null && srv.posts.length >= srv.failAfterPosts) return reply(500, { message: "down" });
+            const body = JSON.parse(options.body);
+            srv.posts.push(body.map(r => r[col]));
+            body.forEach(r => {
+                const had = rows.get(String(r[col]));
+                if (refuseOlder && had && r.client_updated_at < had.client_updated_at) return;
+                rows.set(String(r[col]), Object.assign({}, r, { updated_at: new Date(++srv.clock * 1000).toISOString() }));
+            });
+            return reply(201, null);
+        }
+        const all = [...rows.values()].sort((a, b) => a.updated_at < b.updated_at ? -1 : 1);
+        const inList = u.searchParams.get(col);
+        if (inList) {
+            const ids = inList.slice(4, -1).split(",").map(x => x.replace(/"/g, ""));
+            return reply(200, all.filter(r => ids.includes(String(r[col]))).map(r => ({ data: r.data })));
+        }
+        const since = (u.searchParams.get("updated_at") || "").replace("gt.", "");
+        return reply(200, all.filter(r => !since || r.updated_at > since)
+            .map(r => ({ [col]: r[col], client_updated_at: r.client_updated_at, updated_at: r.updated_at })));
+    };
+    return srv;
+}
+
+async function phone(srv) {
+    const p = { idb: new IDBFactory(), storage: fakeLocalStorage() };
+    p.use = async () => {
+        global.indexedDB = p.idb;
+        global.localStorage = p.storage;
+        global.fetch = srv.fetch;
+        await Store.initDB();
+    };
+    await p.use();
+    p.storage.setItem("cloudSync", JSON.stringify({ url: "https://x.test", key: "k", session: { access: "a", refresh: "r", expiresAt: 9999999999, userId: "u" } }));
+    return p;
+}
+
+const syncedRun = (id, updatedAt, extra = {}) => Object.assign(sampleRun(50, id), { updatedAt }, extra);
+const summaryOf = (runs, id) => runs.find(r => r.runId === id);
+
+async function testStorage() {
+    console.log("\n=== Run Storage Tests ===\n");
+
+    // Upgrading the database a phone already has
+    global.indexedDB = new IDBFactory();
+    const old = sampleRun();
+    old.updatedAt = 12345;
+    const unfinished = Object.assign(sampleRun(30, old.runId + 1), { endTime: null, updatedAt: 5 });
+    const bare = { runId: old.runId + 2, startTime: old.startTime + 2, endTime: old.endTime, distance: 2000, time: 600, pace: 300, timeSeries: [], updatedAt: 7 };
+    await new Promise((resolve, reject) => {
+        const req = indexedDB.open("RunDB", 2);
+        req.onupgradeneeded = e => {
+            const d = e.target.result;
+            d.createObjectStore("runs", { keyPath: "runId" }).createIndex("startTime", "startTime", { unique: false });
+            const cp = d.createObjectStore("courseProgress", { keyPath: "progressId" });
+            cp.createIndex("courseId", "courseId", { unique: false });
+            cp.createIndex("status", "status", { unique: false });
+        };
+        req.onsuccess = e => {
+            const tx = e.target.result.transaction(["runs", "courseProgress"], "readwrite");
+            [old, unfinished, bare].forEach(r => tx.objectStore("runs").put(r));
+            tx.objectStore("courseProgress").put({ progressId: "p", courseId: "c", status: "active" });
+            tx.oncomplete = () => { e.target.result.close(); resolve(); };
+            tx.onerror = reject;
+        };
+    });
+    await Store.initDB();
+    const list = await Store.getAllRuns();
+    assert(list.length === 3, "Upgrade: every run survives");
+    assert(list.every(r => r.track === undefined && r.raw === undefined && r.pathSegments === undefined), "Upgrade: lists no longer carry the GPS data");
+    const back = await Store.getRunById(old.runId);
+    assert(back.track.length === 600 && back.raw.length === 600 && back.pathSegments.length === 2, "Upgrade: the whole run still comes back by id");
+    assert(back.updatedAt === 12345, "Upgrade: not counted as a change, so nothing re-uploads");
+    assert(back.timeSeries.length === old.timeSeries.length && back.hr.max === 190, "Upgrade: the rest of the run is untouched");
+    const s = summaryOf(list, old.runId);
+    const direct = RunAnalysis.runBestEffort(old, 1000);
+    assert(s.derived.dense && s.derived.efforts[1000].timeMs === direct.timeMs, "Upgrade: best efforts kept, from the full track");
+    assert(RunAnalysis.runBestEffort(s, 1000).startM === direct.startM, "A summary answers best efforts as the full run would");
+    assert(s.derived.routeSig.pts.length === RunAnalysis.routeSignature(old).pts.length, "Upgrade: route signature kept");
+    assert(RunAnalysis.groupRoutes([s, Object.assign({}, s, { runId: 9, startTime: s.startTime + 1 })])[0].runs.length === 2, "Summaries group into routes");
+    assert(!summaryOf(list, unfinished.runId).derived, "Unfinished runs get no summary until they're finished");
+    assert((await Store.getRunById(unfinished.runId)).track.length === 30, "Upgrade: an unfinished run keeps its track for recovery");
+    assert((await Store.getRunById(bare.runId)).distance === 2000, "Upgrade: a run with no GPS data is fine");
+
+    // Writes
+    await Store.patchRun(old.runId, { rpe: 7, note: "tired" });
+    let r = await Store.getRunById(old.runId);
+    assert(r.rpe === 7 && r.track.length === 600 && r.updatedAt > 12345, "patchRun: changes the field, keeps the GPS data, counts as a change");
+    await Store.patchRun(old.runId, { note: undefined });
+    assert(!("note" in await Store.getRunById(old.runId)), "patchRun: undefined removes a field");
+    assert(await Store.patchRun(424242, { rpe: 1 }) === null, "patchRun: a run that's gone stays gone");
+    await Store.updateRun(summaryOf(await Store.getAllRuns(), old.runId));
+    assert((await Store.getRunById(old.runId)).track.length === 600, "updateRun with a summary leaves the GPS data alone");
+
+    await Store.saveLiveRun(unfinished.runId, { distance: 999, track: [[0, 0, 1, 2]], raw: [], pathSegments: [[[1, 2]]] });
+    r = await Store.getRunById(unfinished.runId);
+    assert(r.distance === 999 && r.track.length === 1 && r.updatedAt === 5, "Autosave: updates the live run without marking it changed");
+
+    const trimmed = RunAnalysis.trimRun(await Store.getRunById(old.runId), 300000);
+    await Store.updateRun(trimmed);
+    r = await Store.getRunById(old.runId);
+    assert(r.track.length === 301 && r.raw.length === 301, "Trimmed run saved");
+    const after = summaryOf(await Store.getAllRuns(), old.runId);
+    assert(after.distance === 900 && !after.derived.efforts[1000], "A trimmed run's summary drops the efforts it's too short for");
+
+    await Store.deleteRun(old.runId, 777);
+    assert(await Store.getRunById(old.runId) === null, "Delete: the run is gone");
+    assert(!summaryOf(await Store.getAllRuns(), old.runId), "Delete: gone from lists");
+    assert((await Store.getDeletedRuns())[0].updatedAt === 777, "Delete: leaves a record for sync");
+    await Store.storeRemoteRun(Object.assign(sampleRun(10, old.runId), { updatedAt: 888 }));
+    assert((await Store.getDeletedRuns()).length === 0, "A newer copy from another phone brings a deleted run back");
+    await Store.forgetRun(unfinished.runId);
+    assert(await Store.getRunById(unfinished.runId) === null && (await Store.getDeletedRuns()).length === 0, "Forgetting a run that never synced leaves no delete record");
+}
+
+async function testSync() {
+    console.log("\n=== Cloud Sync Tests ===\n");
+    const T = Date.UTC(2026, 0, 1);
+
+    // A new phone gets everything back
+    let srv = fakeServer();
+    const a = await phone(srv);
+    await Store.storeRemoteRun(syncedRun(T, 1000));
+    await Store.storeRemoteRun(syncedRun(T + 1, 1001, { routeName: "River loop" }));
+    let res = await CloudSync.sync();
+    assert(res && res.pushed === 2, "First sync sends both runs");
+    assert(srv.runs.get(String(T)).data.track.length === 50, "The cloud gets the whole run, GPS data included");
+    assert(!("derived" in srv.runs.get(String(T)).data), "The phone's own summary stays on the phone");
+    res = await CloudSync.sync();
+    assert(res.pushed === 0 && res.pulled === 0, "Nothing changed: nothing sent or fetched");
+
+    const b = await phone(srv);
+    res = await CloudSync.sync();
+    assert(res.pulled === 2 && res.pushed === 0, "New phone: downloads the runs and doesn't send them back");
+    const restored = await Store.getRunById(T);
+    assert(restored.track.length === 50 && restored.updatedAt === 1000, "New phone: whole run, with its own stamp");
+    assert((await Store.getAllRuns()).every(r => r.derived && r.track === undefined), "New phone: runs are split and summarised");
+    assert((await Store.getRunById(T + 1)).routeName === "River loop", "A route's name comes back with its run");
+
+    // Deletes reach the other phone
+    await a.use();
+    await Store.deleteRun(T, Date.now());
+    res = await CloudSync.sync();
+    const row = srv.runs.get(String(T));
+    assert(row.data.deleted === true && !row.data.track, "Delete: the cloud row loses its GPS data");
+    await b.use();
+    res = await CloudSync.sync();
+    assert(await Store.getRunById(T) === null, "Delete: the other phone drops the run");
+    assert(res.pushed === 0, "Delete: the other phone doesn't send it back");
+    const c = await phone(srv);
+    await CloudSync.sync();
+    assert((await Store.getAllRuns()).length === 1, "Delete: a phone signing in later never sees the run");
+
+    // A run deleted here and edited elsewhere: the later change wins
+    await a.use();
+    await Store.storeRemoteRun(syncedRun(T + 2, Date.now() + 1));
+    await new Promise(r => setTimeout(r, 5));
+    await CloudSync.sync();
+    await b.use();
+    await CloudSync.sync();
+    await Store.deleteRun(T + 2, Date.now() + 2);
+    await new Promise(r => setTimeout(r, 5));
+    await a.use();
+    await Store.updateRun(Object.assign(await Store.getRunById(T + 2), { note: "keep me" }));
+    await new Promise(r => setTimeout(r, 5));
+    await CloudSync.sync();
+    await b.use();
+    await CloudSync.sync();
+    assert((await Store.getRunById(T + 2)).note === "keep me", "Deleted on one phone, edited later on another: the edit wins");
+    assert((await Store.getDeletedRuns()).every(d => d.runId !== T + 2), "...and the delete record goes");
+
+    // A phone that's behind
+    srv = fakeServer();
+    const p1 = await phone(srv);
+    await Store.storeRemoteRun(syncedRun(T, 1000));
+    await CloudSync.sync();
+    const p2 = await phone(srv);
+    await CloudSync.sync();
+    await p1.use();
+    await Store.storeRemoteRun(Object.assign(await Store.getRunById(T), { updatedAt: 2000, note: "newer" }));
+    await CloudSync.sync();
+    await p2.use();
+    await Store.storeRemoteRun(Object.assign(await Store.getRunById(T), { updatedAt: 1500, note: "older" }));
+    await CloudSync.sync();
+    assert(srv.runs.get(String(T)).data.note === "newer", "A phone that's behind doesn't overwrite the newer copy");
+    assert((await Store.getRunById(T)).note === "newer", "...and it takes the newer copy");
+
+    // Unsent work survives a pull of something newer
+    await p2.use();
+    await Store.storeRemoteRun(syncedRun(T + 5, 2500, { note: "unsent" }));
+    await p1.use();
+    await Store.storeRemoteRun(syncedRun(T + 6, 2600));
+    await CloudSync.sync();
+    await p2.use();
+    res = await CloudSync.sync();
+    assert(res.pulled === 1 && srv.runs.get(String(T + 5)).data.note === "unsent", "Unsent changes still go up after pulling something newer");
+
+    // Cut off halfway
+    srv = fakeServer();
+    const p3 = await phone(srv);
+    for (let i = 0; i < 12; i++) await Store.storeRemoteRun(syncedRun(T + i, 1000 + i));
+    srv.failAfterPosts = 1;
+    res = await CloudSync.sync();
+    assert(res === null && srv.runs.size === 5, "Sync cut off: reports failure with the first chunk up");
+    assert(/down/.test(JSON.parse(localStorage.getItem("cloudSync")).lastError), "Sync cut off: remembers why");
+    srv.failAfterPosts = null;
+    srv.posts.length = 0;
+    res = await CloudSync.sync();
+    assert(res.pushed === 7 && !srv.posts.flat().includes(T) && srv.runs.size === 12, "Next sync carries on from there");
+
+    // Gym sessions and walks travel like runs
+    srv = fakeServer();
+    await phone(srv);
+    await Store.saveRun(Object.assign({ runId: T, startTime: T, endTime: T + 1000, distance: 0, time: 1, pace: 0, timeSeries: [] }, gym(1, 60, 8, [8, 8, 8]), { startTime: T, endTime: T + 1000 }));
+    await Store.storeRemoteRun(syncedRun(T + 1, Date.now(), { activity: "walk" }));
+    await new Promise(r => setTimeout(r, 5));
+    await CloudSync.sync();
+    await phone(srv);
+    await CloudSync.sync();
+    const session = await Store.getRunById(T);
+    assert(session.activity === "strength" && session.exercises[0].sets.length === 3, "A gym session reaches the other phone whole");
+    assert((await Store.getRunById(T + 1)).activity === "walk", "A walk stays a walk");
+    assert((await Store.getLatestRun()) === null, "Neither counts as your last run");
+
+    // Equal stamps either side of a chunk
+    srv = fakeServer();
+    await phone(srv);
+    for (let i = 0; i < 7; i++) await Store.storeRemoteRun(syncedRun(T + i, 5000));
+    srv.failAfterPosts = 1;
+    await CloudSync.sync();
+    srv.failAfterPosts = null;
+    await CloudSync.sync();
+    assert(srv.runs.size === 7, "Runs with the same stamp aren't skipped when a sync is cut off between them");
+
+    // Watermark from before this version
+    srv = fakeServer();
+    await phone(srv);
+    localStorage.setItem("cloudSync", JSON.stringify(Object.assign(JSON.parse(localStorage.getItem("cloudSync")), { lastPush: 5000 })));
+    await Store.storeRemoteRun(syncedRun(T, 4000));
+    await Store.storeRemoteRun(syncedRun(T + 1, 6000));
+    res = await CloudSync.sync();
+    assert(res.pushed === 1 && srv.runs.has(String(T + 1)), "Upgrading: picks up from the old watermark, no full re-upload");
+
+    // Course records still sync
+    srv = fakeServer();
+    await phone(srv);
+    await new Promise(r => { const t = db.transaction(["courseProgress"], "readwrite"); t.objectStore("courseProgress").put({ progressId: "c-beginner-1", courseId: "c", status: "active", updatedAt: 10 }); t.oncomplete = r; });
+    await CloudSync.sync();
+    await phone(srv);
+    await CloudSync.sync();
+    const cps = await new Promise(r => { const q = db.transaction(["courseProgress"]).objectStore("courseProgress").getAll(); q.onsuccess = () => r(q.result); });
+    assert(cps.length === 1 && cps[0].progressId === "c-beginner-1", "Course progress reaches the new phone");
+
+    // Backup file, written in pieces on Android
+    srv = fakeServer();
+    await phone(srv);
+    await Store.storeRemoteRun(syncedRun(T, 100));
+    await Store.storeRemoteRun(syncedRun(T + 1, 101, { note: 'quotes " and \\ survive' }));
+    await Store.deleteRun(T + 2, 500);
+    const pieces = [];
+    let cancelled = 0;
+    global.NativeTracker = {
+        available: true,
+        fileStart: async () => {}, fileAppend: async t => { pieces.push(t); },
+        fileFinish: async () => "Downloads/x.json", fileCancel: async () => { cancelled++; },
+    };
+    const msg = await CloudSync.exportJson();
+    const file = JSON.parse(pieces.join(""));
+    assert(msg === "Saved 2 runs to Downloads/x.json", "Export: reports where it went");
+    assert(file.app === "run-tracker" && file.runs.length === 2 && file.runs[0].track.length === 50, "Export: valid JSON with whole runs");
+    assert(file.runs.every(r => !("derived" in r)), "Export: the phone's own summary stays out");
+    await phone(srv);
+    assert(/Imported 2 runs/.test(await CloudSync.importJson(pieces.join(""))), "Import: reads the file back");
+    assert((await Store.getRunById(T + 1)).note === 'quotes " and \\ survive' && (await Store.getRunById(T)).track.length === 50, "Import: runs come back whole");
+    await Store.deleteRun(T, Date.now());
+    assert(/Imported 0 runs/.test(await CloudSync.importJson(pieces.join(""))), "Import: an old backup doesn't bring back a run you deleted");
+
+    pieces.length = 0;
+    global.NativeTracker.fileAppend = async () => { throw new Error("disk full"); };
+    let failedMsg = "";
+    await CloudSync.exportJson().catch(e => { failedMsg = e.message; });
+    assert(failedMsg === "disk full" && cancelled === 1, "Export: a failed write is cancelled and reported");
+    global.NativeTracker = { available: false };
+}
+
+const storeTests = weatherTest.then(testStorage).then(testSync);
+
 // ─── Summary ─────────────────────────────────────────────────────────────────
 
-console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
-process.exit(failed > 0 ? 1 : 0);
+storeTests.catch(err => assert(false, `Async tests threw: ${err && err.stack || err}`)).then(() => {
+    console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
+    process.exit(failed > 0 ? 1 : 0);
+});

@@ -139,6 +139,9 @@ const RunAnalysis = (() => {
     // to have been run at an even pace (`even: true`).
     function runBestEffort(run, targetM) {
         if (!run || !(run.distance >= targetM) || !(run.time > 0)) return null;
+        // Worked out from the full track when the run was saved (run-store.js)
+        const known = run.derived && run.derived.efforts && run.derived.efforts[targetM];
+        if (known) return known;
         const best = bestEffort(completeSeries(run), targetM);
         return best || { startM: 0, timeMs: run.time * 1000 * targetM / run.distance, even: true };
     }
@@ -306,11 +309,11 @@ const RunAnalysis = (() => {
     // to reuse signatures between calls.
     function groupRoutes(runs, cache) {
         const groups = [];
-        const sorted = runs.filter(r => r.endTime && r.distance >= 500).sort((a, b) => a.startTime - b.startTime);
+        const sorted = runs.filter(r => r.endTime && r.distance >= 500 && !r.activity).sort((a, b) => a.startTime - b.startTime);
         for (const run of sorted) {
             let sig = cache && cache.get(run.runId);
             if (sig === undefined) {
-                sig = routeSignature(run);
+                sig = run.derived && run.derived.routeSig !== undefined ? run.derived.routeSig : routeSignature(run);
                 if (cache) cache.set(run.runId, sig);
             }
             if (!sig) continue;
@@ -392,12 +395,25 @@ const RunAnalysis = (() => {
 
     // Predicted 5K pace (s/km) from your recent runs, via Riegel's formula.
     function fiveKPace(runs, beforeTime, windowDays = 120) {
-        const done = runs.filter(r => r.endTime && r.startTime < beforeTime && r.distance >= 1500 && r.time > 0);
+        const done = runs.filter(r => r.endTime && r.startTime < beforeTime && r.distance >= 1500 && r.time > 0 && !r.activity);
         const recent = done.filter(r => r.startTime > beforeTime - windowDays * 86400000);
         const pool = recent.length ? recent : done;
         if (!pool.length) return null;
         const best = Math.min(...pool.map(r => r.time * Math.pow(5000 / r.distance, 1.06)));
         return best / 5;
+    }
+
+    // VO2max from your predicted 5K, by Daniels and Gilbert's formula: the oxygen
+    // cost of that speed over the share of VO2max a runner can hold for that long.
+    // Walks don't count; null without a run to go on.
+    function vo2max(runs, now = Date.now()) {
+        const p5 = fiveKPace(runs.filter(r => r.pace > 0 && r.pace <= 540), now);
+        if (!p5) return null;
+        const minutes = p5 * 5 / 60;
+        const speed = 5000 / minutes;
+        const cost = -4.6 + 0.182258 * speed + 0.000104 * speed * speed;
+        const share = 0.8 + 0.1894393 * Math.exp(-0.012778 * minutes) + 0.2989558 * Math.exp(-0.1932605 * minutes);
+        return Math.round(cost / share * 10) / 10;
     }
 
     // What a segment asks for, as a pace range in multiples of 5K pace.
@@ -548,6 +564,53 @@ const RunAnalysis = (() => {
         return last[0] > first[0] ? (last[1] - first[1]) * 60000 / (last[0] - first[0]) : null;
     }
 
+    // ─── Editing a run ───────────────────────────────────────────────────────
+
+    // The run as if you'd finished `keepMs` of moving time in (you forgot to stop,
+    // or got in a car). Needs the full run with a track. Snaps to the last fix
+    // before the cut; null if that would leave nothing, or nothing would change.
+    function trimRun(run, keepMs) {
+        const track = run.track;
+        if (!track || track.length < 2) return null;
+        let n = lowerBound(track.map(p => ({ t: p[0] })), "t", keepMs + 1);
+        if (n < 2 || n >= track.length) return null;
+        const kept = track.slice(0, n);
+        const last = kept[n - 1];
+        const moving = last[0];
+        const out = Object.assign({}, run, {
+            track: kept,
+            distance: last[1],
+            time: moving / 1000,
+            pace: last[1] > 0 ? moving / 1000 / (last[1] / 1000) : 0,
+            endTime: run.startTime + wallOffset(run, moving),
+            estimatedDistance: Math.min(run.estimatedDistance || 0, last[1]),
+            timeSeries: (run.timeSeries || []).filter(p => p.time <= moving),
+        });
+        ["raw", "steps", "coachLog"].forEach(k => { if (run[k]) out[k] = run[k].filter(p => p[0] <= moving); });
+        if (run.pauses) out.pauses = run.pauses.filter(p => p[0] <= moving);
+        // Each track point is one point of the drawn path, in order
+        if (run.pathSegments) {
+            let left = n;
+            out.pathSegments = run.pathSegments.map(seg => {
+                const part = seg.slice(0, left);
+                left -= part.length;
+                return part;
+            }).filter(seg => seg.length);
+        }
+        if (run.hr && run.hr.samples && run.hr.samples.length) {
+            const wall = wallOffset(run, moving);
+            const samples = run.hr.samples.filter(s => s[0] <= wall);
+            const bpm = samples.map(s => s[1]);
+            out.hr = samples.length
+                ? Object.assign({}, run.hr, { samples, avg: Math.round(bpm.reduce((a, b) => a + b, 0) / bpm.length), max: Math.max(...bpm) })
+                : { samples: [], none: true };
+        }
+        // The hill profile covers the old route; enrich.js fetches the new one
+        delete out.elevation;
+        delete out.derived;
+        return out;
+    }
+
     // ─── Formatting / parsing ────────────────────────────────────────────────
 
     // "24:59" or "1:05:00" to ms; null if it doesn't parse. Phone number pads
@@ -581,7 +644,7 @@ const RunAnalysis = (() => {
         sparseSeries, completeSeries, bestEffort, runBestEffort, sliceSeries, kmSplits, findStops, paceSegments, quantile, metres,
         routeSignature, coverage, sameRoute, groupRoutes, rankRoute,
         ghostCue, spokenMetres, CUE_EVERY_M,
-        fiveKPace, segmentTarget, guidedReport, parseDuration, formatDistance,
+        fiveKPace, vo2max, segmentTarget, guidedReport, parseDuration, formatDistance, trimRun,
         minettiFactor, flatMetres, hillFactor, heatSlowdown, wallOffset, hrBetween, cadenceBetween,
     };
 })();

@@ -45,10 +45,13 @@ class RunTrackerService : Service(), LocationListener {
         const val ACTION_PAUSE = "pause"
         const val ACTION_RESUME = "resume"
         const val ACTION_STOP = "stop"
+        const val ACTION_RESTORE = "restore"
         private const val CHANNEL_ID = "run_tracking"
         private const val NOTIFICATION_ID = 1
         private const val TICK_MS = 500L
         private const val PERSIST_EVERY_MS = 10_000L
+        /** How long the last announcement gets before the service stops anyway. */
+        private const val SPEECH_DRAIN_MS = 15_000L
 
         /** The running service, if any. Only touched on the main thread. */
         var instance: RunTrackerService? = null
@@ -60,7 +63,13 @@ class RunTrackerService : Service(), LocationListener {
         /** Config for the next ACTION_START (kept out of the Intent to avoid size limits). */
         var pendingConfig: RunConfig? = null
 
+        /** The run to carry on with at the next ACTION_RESTORE. */
+        var pendingRestore: RunEngine? = null
+
         fun snapshotFile(context: Context) = File(context.filesDir, "active_run.json")
+
+        /** What the run started with, kept to carry on with it if the app is killed. */
+        fun configFile(context: Context) = File(context.filesDir, "active_run_config.json")
 
         fun intent(context: Context, action: String) =
             Intent(context, RunTrackerService::class.java).setAction(action)
@@ -92,6 +101,8 @@ class RunTrackerService : Service(), LocationListener {
                 lastEmittedSecond = second
                 publish(now)
             }
+            // Here, not per fix: with no GPS the clock still has to reach the disk
+            if (e.status == RunEngine.Status.RUNNING && now - lastPersist >= PERSIST_EVERY_MS) persist(now)
             main.postDelayed(this, TICK_MS)
         }
     }
@@ -118,6 +129,17 @@ class RunTrackerService : Service(), LocationListener {
                 }
                 startRun(config)
             }
+            ACTION_RESTORE -> {
+                val restored = pendingRestore
+                pendingRestore = null
+                val busy = engine?.let { it.status != RunEngine.Status.FINISHED } ?: false
+                if (restored == null || busy) {
+                    if (engine == null) stopSelf()
+                    return START_NOT_STICKY
+                }
+                // Paused: GPS starts when you tap Resume
+                begin(restored, System.currentTimeMillis())
+            }
             ACTION_PAUSE -> pauseRun()
             ACTION_RESUME -> resumeRun()
             ACTION_STOP -> stopRun()
@@ -130,7 +152,11 @@ class RunTrackerService : Service(), LocationListener {
 
     private fun startRun(config: RunConfig) {
         val now = System.currentTimeMillis()
-        val e = RunEngine(config, now)
+        begin(RunEngine(config, now), now)
+        requestLocation()
+    }
+
+    private fun begin(e: RunEngine, now: Long) {
         engine = e
         shuttingDown = false
         runGeneration++
@@ -141,7 +167,6 @@ class RunTrackerService : Service(), LocationListener {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RunTracker::run")
             .apply { acquire(6 * 60 * 60 * 1000L) }
 
-        requestLocation()
         startSteps()
         persist(now)
         main.post(ticker)
@@ -185,17 +210,24 @@ class RunTrackerService : Service(), LocationListener {
         // Let the last announcement ("Workout complete!", ghost result) finish
         // before the service, and with it the TTS engine, goes away.
         val generation = runGeneration
-        speaker.whenIdle {
-            if (generation != runGeneration) return@whenIdle // a new run started meanwhile
-            wakeLock?.let { if (it.isHeld) it.release() }
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            stopSelf()
+        var stopped = false
+        val stop = Runnable {
+            // Not if a new run started meanwhile
+            if (!stopped && generation == runGeneration) {
+                stopped = true
+                wakeLock?.let { if (it.isHeld) it.release() }
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
+        speaker.whenIdle { stop.run() }
+        // A stuck TTS engine must not leave the notification and wake lock behind
+        main.postDelayed(stop, SPEECH_DRAIN_MS)
         return snapshot
     }
 
     override fun onDestroy() {
-        main.removeCallbacks(ticker)
+        main.removeCallbacksAndMessages(null)
         locationManager.removeUpdates(this)
         stopSteps()
         engine?.let { if (it.status != RunEngine.Status.FINISHED) persist(System.currentTimeMillis()) }
@@ -227,7 +259,6 @@ class RunTrackerService : Service(), LocationListener {
         val bearing = if (location.hasBearing()) location.bearing.toDouble() else null
         val altitude = if (location.hasAltitude()) location.altitude else null
         speakAll(e.onLocation(location.latitude, location.longitude, accuracy, now, speed, bearing, altitude))
-        if (now - lastPersist >= PERSIST_EVERY_MS) persist(now)
         publish(now)
     }
 
@@ -259,7 +290,9 @@ class RunTrackerService : Service(), LocationListener {
     @Deprecated("Deprecated in Java")
     override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) {}
     override fun onProviderEnabled(provider: String) {}
-    override fun onProviderDisabled(provider: String) {}
+    override fun onProviderDisabled(provider: String) {
+        if (provider == LocationManager.GPS_PROVIDER) engine?.let { speakAll(it.onGpsOff(System.currentTimeMillis())) }
+    }
 
     // ─── Output: voice, web layer, notification, disk ────────────────────────
 
@@ -305,7 +338,7 @@ class RunTrackerService : Service(), LocationListener {
         val elapsedSec = e.elapsedMs(now) / 1000
         val km = e.totalDistance / 1000
         val pace = if (e.totalDistance > 0) RunEngine.formatTime((elapsedSec / km).toLong()) else "--:--"
-        val title = String.format("%.2f km · %s", km, RunEngine.formatTime(elapsedSec))
+        val title = String.format("%.2f km · %s", km, RunEngine.formatTime(elapsedSec)) + if (e.gpsLost) " · no GPS" else ""
         var text = "$pace /km"
         val guided = e.config.guided
         if (guided != null && e.guidedIndex in guided.indices) {

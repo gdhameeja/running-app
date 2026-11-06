@@ -60,25 +60,29 @@ function getBestRunsForGhost(runs) {
 
 const routeSignatureCache = new Map();
 
-function loadRouteNames() {
-    try { return JSON.parse(localStorage.getItem("routeNames") || "{}") || {}; } catch (e) { return {}; }
+// A route's name is kept on its oldest run (whose id is the route's id), so it
+// goes to the cloud and into backups with the run.
+function saveRouteName(id, name) {
+    return patchRun(id, { routeName: name || undefined });
 }
 
-function saveRouteName(id, name) {
-    const names = loadRouteNames();
-    if (name) names[id] = name; else delete names[id];
-    try { localStorage.setItem("routeNames", JSON.stringify(names)); } catch (e) { /* storage unavailable */ }
+// Names used to live in localStorage: move them onto their runs, once
+function migrateRouteNames() {
+    let names = null;
+    try { names = JSON.parse(localStorage.getItem("routeNames") || "null"); } catch (e) { /* storage unavailable */ }
+    if (!names) return Promise.resolve();
+    return Promise.all(Object.keys(names).map(id => saveRouteName(Number(id), names[id])))
+        .then(() => { try { localStorage.removeItem("routeNames"); } catch (e) { /* storage unavailable */ } });
 }
 
 // Routes run at least twice, newest activity first, each ranked and named.
 function findRoutes(runs) {
-    const names = loadRouteNames();
     const groups = RunAnalysis.groupRoutes(runs, routeSignatureCache).filter(g => g.runs.length >= 2);
     const defaults = {};
     return groups.map(g => {
         const ranked = RunAnalysis.rankRoute(g);
         const km = (ranked.distance / 1000).toFixed(1);
-        let name = names[g.id];
+        let name = g.runs[0].routeName;
         if (!name) {
             const base = `${km} km ${g.sig.loop ? "loop" : "route"}`;
             defaults[base] = (defaults[base] || 0) + 1;
@@ -118,7 +122,7 @@ const TARGET_DISTANCES = [
 
 function renderGhostRaceTab() {
     getAllRuns().then(allRuns => {
-        const runs = allRuns.filter(r => r.endTime && r.distance > 0);
+        const runs = allRuns.filter(r => r.endTime && r.distance > 0 && !r.activity);
         const ghosts = getBestRunsForGhost(runs);
         const container = document.getElementById("ghost-race-content");
         container.innerHTML = `
@@ -270,7 +274,7 @@ function renderPastRuns(runs) {
             <div class="gr-run-row">
                 <div class="gr-run-main">
                     <div class="gr-run-title">${i === 0 ? "Last run · " : ""}${shortDate(r.startTime)}</div>
-                    <div class="gr-run-meta">${(r.distance / 1000).toFixed(2)} km · ${formatTime(Math.round(r.time))} · ${formatPace(r.pace)} /km${r.track ? "" : " · splits only"}</div>
+                    <div class="gr-run-meta">${(r.distance / 1000).toFixed(2)} km · ${formatTime(Math.round(r.time))} · ${formatPace(r.pace)} /km${r.derived && r.derived.dense ? "" : " · splits only"}</div>
                 </div>
                 <button class="btn-small gr-race" data-id="${r.runId}">Race</button>
             </div>`).join("") +
@@ -324,8 +328,12 @@ function renderRoutes(runs) {
         card.querySelector(".gr-rename").addEventListener("click", () => {
             const name = prompt("Name this route", route.name);
             if (name === null) return;
-            saveRouteName(route.id, name.trim().slice(0, 40));
-            renderRoutes(runs);
+            const clean = name.trim().slice(0, 40);
+            saveRouteName(route.id, clean).then(() => {
+                const first = runs.find(r => r.runId === route.id);
+                if (first) first.routeName = clean || undefined;
+                renderRoutes(runs);
+            });
         });
         card.querySelector(".ghost-start-btn").addEventListener("click", () =>
             startGhostRaceMode({ type: "run", runId: best.run.runId, targetM: distance, label: `Best on ${route.name}` }));

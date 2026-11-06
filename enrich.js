@@ -8,7 +8,7 @@
 //  - Heart rate from your watch through Health Connect, matched to the run by time.
 // It also reads last night's sleep and your resting heart rate to suggest
 // how fresh you are (Tired / Normal / Fresh) before a run.
-// Changes are saved with updateRun, so cloud sync picks them up.
+// Changes are saved with patchRun, so cloud sync picks them up.
 
 const Enrich = (() => {
     const ELEVATION_URL = "https://api.open-meteo.com/v1/elevation";
@@ -20,11 +20,13 @@ const Enrich = (() => {
     // The watch may sync to Health Connect a while after the run; give up after this
     const HR_WAIT_MS = 3 * 86400000;
     const RECENT_MS = 80 * 86400000;
+    const REFRESH_MS = 3600000;
 
     let running = null;
     let health = { status: "unknown", granted: false };
     let readiness = null;
     let today = null;
+    let refreshedAt = 0;
 
     function getJson(url) {
         const ctl = new AbortController();
@@ -68,10 +70,14 @@ const Enrich = (() => {
             });
     }
 
+    // The hour nearest a time, as "2026-11-06T23" in GMT. Near midnight that's
+    // the next day, so the request has to ask for that day too.
+    const nearestHour = (time) => new Date(Math.round(time / 3600000) * 3600000).toISOString().slice(0, 13);
+
     function hourlyAt(data, time) {
         const h = data && data.hourly;
         if (!h || !h.time || !h.time.length) return null;
-        const target = new Date(Math.round(time / 3600000) * 3600000).toISOString().slice(0, 13);
+        const target = nearestHour(time);
         const i = h.time.findIndex(t => t.startsWith(target));
         if (i < 0 || h.temperature_2m[i] == null) return null;
         return {
@@ -85,7 +91,7 @@ const Enrich = (() => {
         const pts = routePoints(run);
         if (!pts.length) return Promise.resolve({ none: true });
         const [, lat, lng] = pts[0];
-        const day = new Date(run.startTime).toISOString().slice(0, 10);
+        const day = nearestHour(run.startTime).slice(0, 10);
         const base = Date.now() - run.startTime < RECENT_MS ? FORECAST_URL : ARCHIVE_URL;
         return getJson(`${base}?latitude=${lat.toFixed(4)}&longitude=${lng.toFixed(4)}&start_date=${day}&end_date=${day}&hourly=${HOURLY}&timezone=GMT`)
             .then(data => {
@@ -128,20 +134,17 @@ const Enrich = (() => {
         running = getAllRuns().then(runs => {
             const todo = runs.filter(r => missing(r).length).sort((a, b) => b.startTime - a.startTime).slice(0, PER_PASS);
             let changed = 0;
-            return todo.reduce((chain, run) => chain.then(() => {
-                let dirty = false;
+            return todo.reduce((chain, summary) => chain.then(() => getRunById(summary.runId)).then(run => {
+                if (!run) return; // deleted meanwhile
+                const found = {};
                 return missing(run).reduce((c, [field, fetcher]) => c.then(() => fetcher(run).then(value => {
-                    if (value) { run[field] = value; dirty = true; }
+                    if (value) found[field] = value;
                 }).catch(() => { /* offline or no data yet: next time */ })), Promise.resolve())
                     .then(() => {
-                        if (!dirty) return;
+                        if (!Object.keys(found).length) return;
                         changed++;
-                        return getRunById(run.runId).then(fresh => {
-                            // Keep anything that changed meanwhile (an RPE answer, say)
-                            const merged = Object.assign(fresh || run, { elevation: run.elevation, weather: run.weather, hr: run.hr });
-                            Object.keys(merged).forEach(k => merged[k] === undefined && delete merged[k]);
-                            return updateRun(merged);
-                        });
+                        // Only these fields, so anything that changed meanwhile (an RPE answer, say) stays
+                        return patchRun(run.runId, found);
                     });
             }), Promise.resolve()).then(() => changed);
         }).finally(() => { running = null; });
@@ -221,10 +224,20 @@ const Enrich = (() => {
         }).catch(() => null);
     }
 
-    function init() {
-        refreshHealth().then(() => refreshReadiness())
+    function refresh() {
+        refreshedAt = Date.now();
+        return refreshHealth().then(() => refreshReadiness())
             .then(() => { if (typeof renderFeelPicker === "function") renderFeelPicker(); })
-            .then(() => pass()).catch(() => {});
+            .then(() => pass()).then(n => { if (n) CloudSync.soon(); }).catch(() => {});
+    }
+
+    // Android keeps the app alive for days, so this can't only happen at launch:
+    // last night's sleep, and heart rate the watch synced late, would never arrive
+    function init() {
+        refresh();
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden && Date.now() - refreshedAt > REFRESH_MS) refresh();
+        });
     }
 
     // After a run: weather and hills now, heart rate once the watch has synced
@@ -233,7 +246,7 @@ const Enrich = (() => {
     }
 
     return {
-        init, pass, afterRun, connectHealth, refreshHealth, refreshReadiness, todayWeather, suggest, routePoints,
+        init, pass, afterRun, connectHealth, refreshHealth, refreshReadiness, todayWeather, suggest, routePoints, weather,
         healthState: () => health,
         readinessNow: () => readiness && Date.now() - readiness.at < 6 * 3600000
             ? { sleepMin: readiness.sleepMin, restingHr: readiness.restingHr, baseline: readiness.baseline, suggested: readiness.feel } : null,

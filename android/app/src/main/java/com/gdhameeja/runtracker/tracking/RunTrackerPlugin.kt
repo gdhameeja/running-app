@@ -13,6 +13,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.Settings
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.getcapacitor.JSObject
 import com.getcapacitor.PermissionState
@@ -30,6 +31,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
+import java.io.OutputStream
 import java.time.Instant
 
 // JS bridge to RunTrackerService (see native-tracker.js for the web side).
@@ -68,12 +70,17 @@ class RunTrackerPlugin : Plugin() {
     @PluginMethod
     fun start(call: PluginCall) {
         val aliases = mutableListOf<String>()
-        if (getPermissionState("location") != PermissionState.GRANTED) {
-            aliases += "location"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) aliases += "notifications"
+        if (getPermissionState("location") != PermissionState.GRANTED) aliases += "location"
+        val prefs = context.getSharedPreferences("run_tracker", Context.MODE_PRIVATE)
+        // Asked once, and not tied to location: the map's first GPS request usually
+        // gets location granted before anyone taps Start. Without this, no notification.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && getPermissionState("notifications") != PermissionState.GRANTED &&
+            !prefs.getBoolean("notificationsAsked", false)
+        ) {
+            prefs.edit().putBoolean("notificationsAsked", true).apply()
+            aliases += "notifications"
         }
         // Asked once; runs work without it, just with no cadence
-        val prefs = context.getSharedPreferences("run_tracker", Context.MODE_PRIVATE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && getPermissionState("activity") != PermissionState.GRANTED &&
             !prefs.getBoolean("activityAsked", false)
         ) {
@@ -109,9 +116,40 @@ class RunTrackerPlugin : Plugin() {
                 call.reject("A run is already in progress", "RUN_IN_PROGRESS")
                 return@post
             }
+            try {
+                RunTrackerService.configFile(context).writeText(call.data.toString())
+            } catch (e: Exception) {
+                Log.w("RunTrackerPlugin", "Could not save the run config; this run can't be carried on if the app is killed", e)
+            }
             RunTrackerService.pendingConfig = config
             ContextCompat.startForegroundService(context, RunTrackerService.intent(context, RunTrackerService.ACTION_START))
             call.resolve()
+        }
+    }
+
+    /** Carries on with a run whose service died; resolves with `{ run }`, paused until you tap Resume. */
+    @PluginMethod
+    fun resumeInterrupted(call: PluginCall) {
+        if (getPermissionState("location") != PermissionState.GRANTED) {
+            call.reject("Location permission denied", "PERMISSION_DENIED")
+            return
+        }
+        main.post {
+            val active = RunTrackerService.instance?.engine
+            if (active != null && active.status != RunEngine.Status.FINISHED) {
+                call.reject("A run is already in progress", "RUN_IN_PROGRESS")
+                return@post
+            }
+            val restored = try {
+                val config = RunJson.parseConfig(JSONObject(RunTrackerService.configFile(context).readText()))
+                RunJson.restore(JSONObject(RunTrackerService.snapshotFile(context).readText()), config)
+            } catch (e: Exception) {
+                call.reject("Could not read the saved run: ${e.message}")
+                return@post
+            }
+            RunTrackerService.pendingRestore = restored
+            ContextCompat.startForegroundService(context, RunTrackerService.intent(context, RunTrackerService.ACTION_RESTORE))
+            call.resolve(JSObject().put("run", RunJson.snapshot(restored, System.currentTimeMillis())))
         }
     }
 
@@ -157,7 +195,45 @@ class RunTrackerPlugin : Plugin() {
             val active = RunTrackerService.instance?.engine
             if (active == null || active.status == RunEngine.Status.FINISHED) {
                 RunTrackerService.snapshotFile(context).delete()
+                RunTrackerService.configFile(context).delete()
             }
+            call.resolve()
+        }
+    }
+
+    // ─── Gym voice (strength.js) ──────────────────────────────────────────────
+
+    @PluginMethod
+    fun workoutStart(call: PluginCall) {
+        val title = call.getString("title") ?: "Workout"
+        main.post {
+            WorkoutService.title = title
+            ContextCompat.startForegroundService(context, WorkoutService.intent(context, WorkoutService.ACTION_START))
+            call.resolve()
+        }
+    }
+
+    /** Replaces what's still to be said: `{ cues: [{ inMs, text }], label }`. */
+    @PluginMethod
+    fun workoutCues(call: PluginCall) {
+        val array = call.getArray("cues") ?: return call.reject("Missing cues")
+        val cues = (0 until array.length()).map {
+            val c = array.getJSONObject(it)
+            WorkoutService.Cue(c.getLong("inMs"), c.getString("text"))
+        }
+        val label = call.getString("label") ?: ""
+        main.post {
+            val service = WorkoutService.instance
+            if (service != null) service.schedule(cues, label) else WorkoutService.pending = cues to label
+            call.resolve()
+        }
+    }
+
+    @PluginMethod
+    fun workoutStop(call: PluginCall) {
+        main.post {
+            WorkoutService.pending = null
+            WorkoutService.instance?.finish()
             call.resolve()
         }
     }
@@ -234,21 +310,65 @@ class RunTrackerPlugin : Plugin() {
 
     // ─── Backups and updates (sync.js) ───────────────────────────────────────
 
-    /** Saves `text` as `name` in Downloads; resolves with `{ location }` to show the user. */
+    // A file in Downloads written a piece at a time: the whole history would be
+    // too big for one message from the page. One at a time; each call is awaited.
+    private var fileOut: OutputStream? = null
+    private var fileUri: Uri? = null
+    private var filePath: File? = null
+    private var fileLocation = ""
+
     @PluginMethod
-    fun saveFile(call: PluginCall) {
+    fun fileStart(call: PluginCall) {
         val name = call.getString("name") ?: return call.reject("Missing name")
-        val text = call.getString("text") ?: return call.reject("Missing text")
-        Thread {
+        io.launch {
             try {
-                call.resolve(JSObject().put("location", writeDownload(name, text.toByteArray())))
+                discardFile()
+                openDownload(name)
+                call.resolve()
             } catch (e: Exception) {
                 call.reject("Could not save the file: ${e.message}")
             }
-        }.start()
+        }
     }
 
-    private fun writeDownload(name: String, bytes: ByteArray): String {
+    @PluginMethod
+    fun fileAppend(call: PluginCall) {
+        val text = call.getString("text") ?: return call.reject("Missing text")
+        io.launch {
+            try {
+                (fileOut ?: throw IllegalStateException("No file open")).write(text.toByteArray())
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject("Could not save the file: ${e.message}")
+            }
+        }
+    }
+
+    /** Resolves with `{ location }` to show the user. */
+    @PluginMethod
+    fun fileFinish(call: PluginCall) {
+        io.launch {
+            try {
+                (fileOut ?: throw IllegalStateException("No file open")).close()
+                fileOut = null
+                fileUri = null
+                filePath = null
+                call.resolve(JSObject().put("location", fileLocation))
+            } catch (e: Exception) {
+                call.reject("Could not save the file: ${e.message}")
+            }
+        }
+    }
+
+    @PluginMethod
+    fun fileCancel(call: PluginCall) {
+        io.launch {
+            discardFile()
+            call.resolve()
+        }
+    }
+
+    private fun openDownload(name: String) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -257,13 +377,27 @@ class RunTrackerPlugin : Plugin() {
             val resolver = context.contentResolver
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: throw IllegalStateException("No Downloads folder")
-            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw IllegalStateException("Could not open $uri")
-            return "Downloads/$name"
+            fileUri = uri
+            fileOut = resolver.openOutputStream(uri) ?: throw IllegalStateException("Could not open $uri")
+            fileLocation = "Downloads/$name"
+            return
         }
         // Before Android 10 public Downloads needs a storage permission; the app's own folder doesn't
         val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
-        File(dir, name).writeBytes(bytes)
-        return File(dir, name).absolutePath
+        val file = File(dir, name)
+        filePath = file
+        fileOut = file.outputStream()
+        fileLocation = file.absolutePath
+    }
+
+    /** Drops a half-written file, so a failed backup can't be mistaken for a good one. */
+    private fun discardFile() {
+        try { fileOut?.close() } catch (e: Exception) { /* going anyway */ }
+        fileOut = null
+        fileUri?.let { uri -> try { context.contentResolver.delete(uri, null, null) } catch (e: Exception) { /* going anyway */ } }
+        fileUri = null
+        filePath?.delete()
+        filePath = null
     }
 
     /** Opens a link in the browser (the APK download for an update). */

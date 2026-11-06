@@ -3,10 +3,10 @@
 // GitHub Releases for a newer APK. Setup: docs/CLOUD_SYNC.md.
 //
 // Local-first: IndexedDB stays what the app reads from, and runs work offline
-// as before. Every local write stamps `updatedAt` (script.js). A sync pushes
-// finished runs and course progress changed since the last push, then lists
+// as before. Every local write stamps `updatedAt` (run-store.js). A sync lists
 // what changed on the server since the last pull and downloads only rows
-// newer than the copy on the phone, so a new phone gets everything back.
+// newer than the copy on the phone, so a new phone gets everything back, then
+// pushes finished runs, deletes and course progress changed since the last push.
 // Row-level security keeps each account's rows private, so the publishable
 // key can live in the app.
 
@@ -16,6 +16,7 @@ const CloudSync = (() => {
     const PUSH_CHUNK = 5;
     const FETCH_CHUNK = 10;
     const LIST_PAGE = 500;
+    const EXPORT_PIECE = 1 << 20;
     // Runs sync as soon as they're saved; otherwise (offline then, or changes
     // from another phone) a catch-up sync at most this often
     const CATCH_UP_MS = 12 * 3600000;
@@ -25,7 +26,7 @@ const CloudSync = (() => {
     let soonTimer = null;
     let latestRelease = null;
 
-    // { url, key, email, session: { access, refresh, expiresAt, userId }, lastPush, lastPull, lastCpPull, lastSyncAt, lastAttemptAt, lastError }
+    // { url, key, email, session: { access, refresh, expiresAt, userId }, lastPushRuns, lastPushCp, lastPull, lastCpPull, lastSyncAt, lastAttemptAt, lastError }
     function cfg() {
         try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { return {}; }
     }
@@ -114,7 +115,7 @@ const CloudSync = (() => {
         return authCall("token?grant_type=password", { email, password }).then(res => {
             keepSession(res);
             // A different account has different rows: start the watermarks over
-            save({ lastPush: 0, lastPull: null, lastCpPull: null });
+            save(Object.assign(forgetWatermarks(), { lastPull: null, lastCpPull: null }));
             return sync();
         });
     }
@@ -124,7 +125,7 @@ const CloudSync = (() => {
         return authCall("signup", { email, password }).then(res => {
             if (!res || !res.access_token) return false;
             keepSession(res);
-            save({ lastPush: 0, lastPull: null, lastCpPull: null });
+            save(Object.assign(forgetWatermarks(), { lastPull: null, lastCpPull: null }));
             return sync().then(() => true);
         });
     }
@@ -155,43 +156,84 @@ const CloudSync = (() => {
     const stamp = (r) => r.updatedAt || r.endTime || r.startTime || r.startDate || 1;
 
     // ─── Sync ────────────────────────────────────────────────────────────────
+    // Pull first, so a phone that's behind takes the newer copy instead of
+    // sending its old one up (schema.sql also refuses that, on projects that
+    // have run the latest version). A deleted run stays on the server as a row
+    // holding just { runId, deleted, updatedAt }, which other phones act on.
 
     const TABLES = {
-        runs: { store: "runs", key: "runId", column: "run_id", ready: r => !!r.endTime },
-        course_progress: { store: "courseProgress", key: "progressId", column: "progress_id", ready: () => true },
+        runs: {
+            key: "runId", column: "run_id", watermark: "lastPushRuns",
+            ready: r => r.deleted || !!r.endTime,
+            // Summaries and delete records: enough to see what changed
+            list: () => Promise.all([getAllRuns(), getDeletedRuns()]).then(([runs, gone]) => runs.concat(gone)),
+            full: r => r.deleted ? Promise.resolve(r) : getRunById(r.runId).then(run => run && exportableRun(run)),
+            store: row => row.deleted ? deleteRun(row.runId, stamp(row)) : storeRemoteRun(row),
+        },
+        course_progress: {
+            key: "progressId", column: "progress_id", watermark: "lastPushCp",
+            ready: () => true,
+            list: () => getAll("courseProgress"),
+            full: r => Promise.resolve(r),
+            store: row => putRaw("courseProgress", row),
+        },
     };
 
-    function push(table) {
+    // Runs and course records each remember how far they got. `lastPush` is what
+    // older versions kept for both.
+    function pushedUpTo(t) {
+        const c = cfg();
+        return c[t.watermark] != null ? c[t.watermark] : c.lastPush || 0;
+    }
+
+    const forgetWatermarks = () => ({ lastPush: 0, lastPushRuns: 0, lastPushCp: 0 });
+
+    // `pulled`: what this sync just got from the server, id -> stamp, which doesn't need sending back.
+    // Oldest first, and progress is kept after each chunk, so a sync cut off
+    // halfway carries on from there next time.
+    function push(table, pulled) {
         const t = TABLES[table];
-        const since = cfg().lastPush || 0;
-        return getAll(t.store).then(all => {
-            const changed = all.filter(r => t.ready(r) && stamp(r) > since && !(isRunLive() && r.runId === currentRunId))
+        const since = pushedUpTo(t);
+        return t.list().then(all => {
+            const changed = all.filter(r => t.ready(r) && stamp(r) > since && pulled.get(String(r[t.key])) !== stamp(r) &&
+                !(isRunLive() && r.runId === currentRunId))
                 .sort((a, b) => stamp(a) - stamp(b));
             let chain = Promise.resolve(0);
             for (let i = 0; i < changed.length; i += PUSH_CHUNK) {
                 const chunk = changed.slice(i, i + PUSH_CHUNK);
-                chain = chain.then(n => rest(`${table}?on_conflict=user_id,${t.column}`, {
-                    method: "POST",
-                    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-                    body: JSON.stringify(chunk.map(r => ({
-                        user_id: cfg().session.userId, [t.column]: r[t.key], data: r, client_updated_at: stamp(r),
-                    }))),
-                }).then(() => n + chunk.length));
+                const next = changed[i + PUSH_CHUNK];
+                chain = chain.then(n => Promise.all(chunk.map(t.full)).then(records => {
+                    const rows = records.filter(Boolean);
+                    if (!rows.length) return n;
+                    return rest(`${table}?on_conflict=user_id,${t.column}`, {
+                        method: "POST",
+                        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+                        body: JSON.stringify(rows.map(r => ({
+                            user_id: cfg().session.userId, [t.column]: r[t.key], data: r, client_updated_at: stamp(r),
+                        }))),
+                    }).then(() => n + rows.length);
+                }).then(n => {
+                    // Equal stamps either side of the cut: the next chunk mustn't be skipped
+                    const newest = stamp(chunk[chunk.length - 1]);
+                    if (!next || stamp(next) > newest) save({ [t.watermark]: newest });
+                    return n;
+                }));
             }
-            return chain.then(n => ({ n, newest: changed.length ? stamp(changed[changed.length - 1]) : since }));
+            return chain;
         });
     }
 
     // Lists rows changed on the server since the last pull, then downloads the ones newer than ours
     function pull(table, watermarkKey) {
         const t = TABLES[table];
-        let pulled = 0, newest = 0;
+        const got = new Map();
+        let newest = 0;
         const page = () => {
             const since = cfg()[watermarkKey];
             const filter = since ? `&updated_at=gt.${encodeURIComponent(since)}` : "";
             return rest(`${table}?select=${t.column},client_updated_at,updated_at${filter}&order=updated_at.asc&limit=${LIST_PAGE}`).then(rows => {
-                if (!rows.length) return { pulled, newest };
-                return getAll(t.store).then(local => {
+                if (!rows.length) return { got, newest };
+                return t.list().then(local => {
                     const mine = new Map(local.map(r => [String(r[t.key]), stamp(r)]));
                     const want = rows.filter(r => !(mine.get(String(r[t.column])) >= r.client_updated_at) &&
                         !(table === "runs" && isRunLive() && Number(r.run_id) === currentRunId))
@@ -202,18 +244,26 @@ const CloudSync = (() => {
                         chain = chain.then(() => rest(`${table}?select=data&${t.column}=in.(${ids.map(encodeURIComponent).join(",")})`))
                             .then(full => Promise.all(full.map(row => {
                                 newest = Math.max(newest, stamp(row.data));
-                                return putRaw(t.store, row.data);
-                            })))
-                            .then(() => { pulled += Math.min(FETCH_CHUNK, want.length - i); });
+                                got.set(String(row.data[t.key]), stamp(row.data));
+                                return t.store(row.data);
+                            })));
                     }
                     return chain.then(() => {
                         save({ [watermarkKey]: rows[rows.length - 1].updated_at });
-                        return rows.length === LIST_PAGE ? page() : { pulled, newest };
+                        return rows.length === LIST_PAGE ? page() : { got, newest };
                     });
                 });
             });
         };
         return page();
+    }
+
+    // Everything older than the sync's start is now on the server: what came down
+    // was already there, and the rest just went up. Anything changed here since
+    // is newer than startedAt, so it's still ahead of this mark.
+    function markSent(table, newest, startedAt) {
+        const t = TABLES[table];
+        save({ [t.watermark]: Math.max(pushedUpTo(t), Math.min(newest, startedAt)) });
     }
 
     function sync() {
@@ -222,18 +272,13 @@ const CloudSync = (() => {
         const startedAt = Date.now();
         save({ lastAttemptAt: startedAt });
         renderPanel("Syncing…");
-        syncing = push("runs")
-            .then(runs => push("course_progress").then(cp => ({ pushed: runs.n + cp.n, newest: Math.max(runs.newest, cp.newest) })))
-            .then(p => {
-                save({ lastPush: p.newest });
-                return pull("runs", "lastPull").then(runs => pull("course_progress", "lastCpPull").then(cp => {
-                    // What just came down is already in the cloud: don't send it back up.
-                    // Anything changed here since the sync started is newer than startedAt.
-                    const pulledNewest = Math.min(Math.max(runs.newest, cp.newest), startedAt);
-                    save({ lastPush: Math.max(cfg().lastPush || 0, pulledNewest) });
-                    return { pushed: p.pushed, pulled: runs.pulled + cp.pulled };
-                }));
-            })
+        syncing = pull("runs", "lastPull")
+            .then(runs => pull("course_progress", "lastCpPull").then(cp => ({ runs, cp })))
+            .then(({ runs, cp }) => push("runs", runs.got).then(pushedRuns => push("course_progress", cp.got).then(pushedCp => {
+                markSent("runs", runs.newest, startedAt);
+                markSent("course_progress", cp.newest, startedAt);
+                return { pushed: pushedRuns + pushedCp, pulled: runs.got.size + cp.got.size };
+            })))
             // A small write each sync: Supabase pauses free projects with too little activity
             .then(res => rest("rpc/heartbeat", { method: "POST", body: "{}" }).catch(() => {}).then(() => res))
             .then(res => {
@@ -268,19 +313,50 @@ const CloudSync = (() => {
 
     // ─── Export / import ─────────────────────────────────────────────────────
 
+    // Where a backup goes, a piece at a time: { append(text), finish(), cancel() }.
+    // finish resolves with the message to show.
+    function fileWriter(name, count) {
+        if (NativeTracker.available) {
+            return NativeTracker.fileStart(name).then(() => ({
+                append: (text) => NativeTracker.fileAppend(text),
+                finish: () => NativeTracker.fileFinish().then(where => `Saved ${count} runs to ${where}`),
+                cancel: () => NativeTracker.fileCancel(),
+            }));
+        }
+        const parts = [];
+        return Promise.resolve({
+            append: (text) => { parts.push(new Blob([text])); return Promise.resolve(); },
+            finish: () => {
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(new Blob(parts, { type: "application/json" }));
+                a.download = name;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+                return Promise.resolve(`Exported ${count} runs`);
+            },
+            cancel: () => Promise.resolve(),
+        });
+    }
+
+    // One run at a time: the whole history in memory at once could be too much for the phone
     function exportJson() {
-        return Promise.all([getAll("runs"), getAll("courseProgress")]).then(([runs, courseProgress]) => {
-            const text = JSON.stringify({ app: "run-tracker", format: 1, exportedAt: new Date().toISOString(), runs, courseProgress });
+        return Promise.all([getAllRuns(), getAll("courseProgress")]).then(([runs, courseProgress]) => {
             const name = `run-tracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
-            if (NativeTracker.available) {
-                return NativeTracker.saveFile(name, text).then(where => `Saved ${runs.length} runs to ${where}`);
-            }
-            const a = document.createElement("a");
-            a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
-            a.download = name;
-            a.click();
-            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-            return `Exported ${runs.length} runs`;
+            const head = JSON.stringify({ app: "run-tracker", format: 1, exportedAt: new Date().toISOString() }).slice(0, -1);
+            return fileWriter(name, runs.length).then(out => {
+                let buffer = `${head},"runs":[`;
+                const flush = () => { const text = buffer; buffer = ""; return out.append(text); };
+                const writing = runs.reduce((chain, summary, i) => chain
+                    .then(() => getRunById(summary.runId))
+                    .then(run => {
+                        buffer += (i ? "," : "") + JSON.stringify(exportableRun(run));
+                        return buffer.length >= EXPORT_PIECE ? flush() : undefined;
+                    }), Promise.resolve());
+                return writing.then(() => {
+                    buffer += `],"courseProgress":${JSON.stringify(courseProgress)}}`;
+                    return flush();
+                }).then(() => out.finish(), err => out.cancel().catch(() => {}).then(() => { throw err; }));
+            });
         });
     }
 
@@ -288,16 +364,17 @@ const CloudSync = (() => {
     function importJson(text) {
         const data = JSON.parse(text);
         if (!data || data.app !== "run-tracker" || !Array.isArray(data.runs)) throw new Error("Not a Run Tracker backup");
-        return Promise.all([getAll("runs"), getAll("courseProgress")]).then(([runs, cps]) => {
+        return Promise.all([TABLES.runs.list(), getAll("courseProgress")]).then(([runs, cps]) => {
+            // `runs` includes the ones you deleted, so an old backup doesn't bring them back
             const newer = (list, key) => {
                 const have = new Map(list.map(r => [r[key], stamp(r)]));
                 return (rec) => rec && rec[key] != null && !(have.get(rec[key]) >= stamp(rec));
             };
             const addRuns = data.runs.filter(newer(runs, "runId"));
             const addCps = (data.courseProgress || []).filter(newer(cps, "progressId"));
-            return Promise.all([...addRuns.map(r => putRaw("runs", r)), ...addCps.map(c => putRaw("courseProgress", c))]).then(() => {
+            return Promise.all([...addRuns.map(storeRemoteRun), ...addCps.map(c => putRaw("courseProgress", c))]).then(() => {
                 // Push everything again on the next sync, so the cloud has what came in
-                if (addRuns.length || addCps.length) { save({ lastPush: 0 }); soon(); }
+                if (addRuns.length || addCps.length) { save(forgetWatermarks()); soon(); }
                 renderHomeRecent();
                 renderHistory();
                 return `Imported ${addRuns.length} runs` + (addCps.length ? ` and ${addCps.length} course records` : "");
@@ -456,7 +533,8 @@ const CloudSync = (() => {
     return { init, sync, soon, exportJson, importJson, checkForUpdate, signIn, signUp, signOut, configured };
 })();
 
-document.addEventListener("DOMContentLoaded", () => {
+if (typeof module !== "undefined") module.exports = CloudSync;
+else document.addEventListener("DOMContentLoaded", () => {
     // After script.js has opened the database
     const wait = setInterval(() => {
         if (!db) return;
