@@ -84,85 +84,9 @@ function formatPace(totalSeconds) {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-let paceChart = null;
 let volumeChart = null;
 
-function renderStats() {
-    getAllRuns().then(all => {
-        // Not the run in progress or an interrupted one: only what you finished
-        const runs = all.filter(r => r.endTime);
-        if (runs.length === 0) {
-            document.getElementById("stats-empty").style.display = "block";
-            document.getElementById("stats-content").style.display = "none";
-            return;
-        }
-        document.getElementById("stats-empty").style.display = "none";
-        document.getElementById("stats-content").style.display = "block";
-
-        renderPaceChart(runs);
-        renderVolumeChart(runs);
-        renderPersonalBests(runs);
-        renderVO2max(runs);
-        document.getElementById("strength-stats").innerHTML = strengthStatsHtml(runs);
-        document.getElementById("walk-stats").innerHTML = walkStatsHtml(runs);
-        WeekReport.renderList();
-        renderCourseProgress();
-    });
-}
-
-function renderPaceChart(runs) {
-    const data = calcPaceTrend(runs);
-    const container = document.getElementById("pace-chart-container");
-    let note = container.querySelector(".chart-note");
-    if (!note) {
-        note = document.createElement("p");
-        note.className = "chart-note";
-        note.textContent = "Need at least 2 runs to show pace trend.";
-        container.appendChild(note);
-    }
-    const ctx = document.getElementById("paceChart");
-    if (paceChart) { paceChart.destroy(); paceChart = null; }
-    // Keep the canvas: hiding it (not replacing it) lets the chart come back later
-    note.style.display = data.length < 2 ? "block" : "none";
-    ctx.style.display = data.length < 2 ? "none" : "block";
-    if (data.length < 2) return;
-    paceChart = new Chart(ctx, {
-        type: "line",
-        data: {
-            labels: data.map(d => d.date),
-            datasets: [{
-                label: "Avg Pace (min/km)",
-                data: data.map(d => d.pace),
-                borderColor: "#3f51b5",
-                fill: false,
-                tension: 0.3,
-                pointRadius: 4,
-                pointBackgroundColor: "#3f51b5"
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
-            scales: {
-                y: {
-                    reverse: true,
-                    title: { display: true, text: "min/km" },
-                    // Fit your own paces, so a 20 s/km improvement is visible
-                    min: Math.floor(Math.min(...data.map(d => d.pace)) * 4 - 1) / 4,
-                    max: Math.ceil(Math.max(...data.map(d => d.pace)) * 4 + 1) / 4,
-                    ticks: {
-                        callback: v => {
-                            const m = Math.floor(v);
-                            const s = Math.round((v - m) * 60);
-                            return `${m}:${s.toString().padStart(2, "0")}`;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
+// The Stats tab itself is drawn by stats-ui.js; these are the parts it reuses.
 
 function renderVolumeChart(runs) {
     const data = calcWeeklyVolume(runs);
@@ -175,11 +99,13 @@ function renderVolumeChart(runs) {
             datasets: [{
                 label: "Weekly km",
                 data: data.map(d => d.km),
-                backgroundColor: "#e91e63",
-                borderRadius: 4
+                backgroundColor: "#2a78d6",
+                borderRadius: 4,
+                barPercentage: 0.8
             }]
         },
         options: {
+            animation: false,
             responsive: true,
             maintainAspectRatio: false,
             plugins: { legend: { display: false } },

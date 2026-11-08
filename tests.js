@@ -1608,6 +1608,77 @@ function gym(day, weight, target, done, ex = benchEx) {
     assert(RA.fitnessAge(45, 35, null) === null && RA.fitnessAge(null, 35, "male") === null, "No age or sex, no fitness age");
 })();
 
+// ─── Stats (stats.js) ────────────────────────────────────────────────────────
+
+(function testStats() {
+    const S = require("./stats.js");
+    const DAY = 86400000;
+    const now = new Date(2026, 10, 9, 20).getTime();
+    const run = (daysAgo, km, min, extra = {}, hour = 7) => {
+        const d = new Date(now - daysAgo * DAY); d.setHours(hour, 0, 0, 0);
+        const t = d.getTime();
+        return Object.assign({ runId: t, startTime: t, endTime: t + min * 60000, distance: km * 1000, time: min * 60, pace: min * 60 / km,
+            timeSeries: Array.from({ length: Math.floor(km) }, (_, i) => ({ distance: (i + 1) * 1000, time: (i + 1) * min * 60000 / km })) }, extra);
+    };
+    const gym = (daysAgo, extra = {}) => { const t = now - daysAgo * DAY - 3600000; return Object.assign({ runId: t, activity: "strength", title: "Full body A", startTime: t, endTime: t + 1800000, distance: 0, time: 1800, pace: 0, exercises: [] }, extra); };
+
+    // Headline: this 4 weeks against the 4 before
+    const s1 = [run(3, 5, 30), run(10, 5, 30), run(20, 10, 60), gym(4), run(40, 5, 30)];
+    const h = S.headline(s1, "4w", now);
+    assert(h.cur.km === 20 && h.cur.runs === 3 && h.cur.workouts === 1 && h.prev.km === 5 && h.km === 300, "Headline: km, runs and workouts against the period before");
+
+    // Calendar and streaks
+    const cal = S.calendar(s1, now);
+    const days = cal.flat();
+    assert(cal.length === 53 && cal.every(w => w.length === 7), "Calendar: a year of weeks, Monday first");
+    assert(days.filter(d => d.runs).length === 4 && days.filter(d => d.gyms).length === 1 && days.some(d => d.future) === (new Date(now).getDay() !== 0), "Calendar: each day says what was done");
+    const st = S.dayStreaks([run(0, 3, 20), run(1, 3, 20), run(2, 3, 20), run(9, 3, 20), run(10, 3, 20)], now);
+    assert(st.longest === 3 && st.current === 3, "Streak: days in a row, and the current one");
+    assert(S.dayStreaks([run(5, 3, 20)], now).current === 0, "A streak that ended isn't current");
+
+    // Records
+    const hot = run(15, 6, 40, { weather: { feelsC: 41 }, elevation: { gain: 120, points: [] } }, 5);
+    const recs = S.records(s1.concat([hot, Object.assign(run(25, 4, 22), { funResults: { bursts: [[3, 230], [5, 90]] } })]), now);
+    const rec = (k) => recs.find(r => r.key === k);
+    assert(rec("longest").value === "10.0 km" && rec("week").value === "16.0 km", "Records: longest run and biggest week");
+    assert(rec("km").value === "5:30 /km", `Records: fastest whole km (${rec("km").value})`);
+    assert(rec("hot").value === "41°C feels-like" && rec("climb").value === "120 m" && rec("early").value === "5:00", "Records: hottest, most climbing, earliest");
+    assert(rec("burst").value === "3:50 /km", "Records: quickest Fun Run burst, ignoring car speeds");
+    assert(recs.every(r => r.key === "streak" || r.runId), "Every record links to its run");
+
+    // Flat and cool, effort split
+    const fc = S.flatCoolPace([run(2, 5, 30, { weather: { feelsC: 38 } })], now - 7 * DAY, now)[0];
+    assert(fc.flat < fc.pace && Math.abs(fc.flat - 360 / 1.08) < 0.5, "Flat and cool: a 38°C run counts as quicker");
+    const it = S.intensity([run(1, 5, 30, { rpe: 3 }), run(2, 5, 30, { rpe: 7 }), run(3, 5, 30, { rpe: 5 }), run(4, 5, 30), run(5, 5, 30, { guided: { plan: { role: "long" } } })], now - 7 * DAY, now);
+    assert(it.easy === 60 && it.hard === 30 && it.moderate === 30 && it.unrated === 30 && Math.abs(it.easyShare - 0.5) < 1e-9, "Effort split: by rating, then by plan role");
+
+    // Predictions
+    const pr = S.predictions([run(5, 5, 25)], "4w", now);
+    assert(pr[0].label === "5K" && Math.round(pr[0].sec) === 1500 && pr[1].sec > 2 * pr[0].sec && pr[0].was === null, "Race predictions from your 5K, Riegel for longer");
+
+    // Strength
+    const lad = (d, level) => gym(d, { exercises: [{ id: "push", name: "Push-ups", variation: "x", level, levels: 6, sets: [{ reps: 8, target: 8 }] }] });
+    const ls = S.ladders([lad(40, 2), lad(20, 3), lad(5, 4)], now - 28 * DAY, now);
+    assert(ls.length === 1 && ls[0].from === 2 && ls[0].to === 4, "Ladders: where you started the period and where you are");
+    const ct = S.calfTests([gym(3, { title: "Calf test", light: true, exercises: [{ id: "calftest", sets: [{ reps: 22 }, { reps: 19 }] }] })]);
+    assert(ct.length === 1 && ct[0].left === 22 && ct[0].right === 19, "Calf tests: each leg");
+    const bal = S.balance([gym(3, { exercises: [{ id: "push", sets: [1, 2, 3] }, { id: "towelrow", sets: [1, 2] }, { id: "squat", sets: [1] }] })], now - 7 * DAY, now);
+    assert(bal.push === 3 && bal.pull === 2 && bal.legs === 1, "Balance: sets by movement");
+
+    // Patterns: only with enough runs, and they say how many
+    const pat = [];
+    for (let i = 0; i < 6; i++) pat.push(run(2 + i, 5, 28, {}, 6), run(30 + i, 5, 31, {}, 18));
+    const ps = S.patterns(pat);
+    assert(ps.length === 1 && ps[0].key === "time" && /Mornings: you run 10% quicker/.test(ps[0].text) && /6 morning and 6 evening/.test(ps[0].n), "Patterns: mornings vs evenings, with the counts");
+    assert(S.patterns(pat.slice(0, 6)).length === 0, "Patterns: too few runs, nothing said");
+
+    // Lifetime and the month
+    const life = S.lifetime([run(1, 100, 600), run(2, 50, 300, { elevation: { gain: 900 } })]);
+    assert(life.km === 150 && life.like.some(x => /Abu Dhabi 1.1 times/.test(x)) && life.like.some(x => /Burj Khalifa 1.1/.test(x)), "Lifetime totals, with something to picture");
+    const recap = S.monthRecap([run(15, 5, 30), run(20, 8, 50), run(45, 5, 30)], new Date(2026, 10, 3, 9).getTime());
+    assert(recap && recap.month && recap.cur.runs >= 1, "Month recap: last month in a few lines");
+})();
+
 // ─── The training plan (training-plan.js) ────────────────────────────────────
 
 (function testTrainingPlan() {

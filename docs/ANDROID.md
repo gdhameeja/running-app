@@ -7,7 +7,7 @@ foreground service that owns the run so it keeps going with the screen locked.
 
 | Piece | Where | Job |
 |---|---|---|
-| Web UI | `index.html`, `script.js`, `courses.js`, `performance.js` | Screens, map, charts, IndexedDB storage. Unchanged in the browser. |
+| Web UI | `index.html`, `script.js`, `courses.js`, `performance.js`, `stats.js` + `stats-ui.js` (the Stats tab) | Screens, map, charts, IndexedDB storage. Unchanged in the browser. |
 | Bridge | `native-tracker.js` | In the app, starts/pauses/stops the service, mirrors its state into the UI, saves finished runs. |
 | Plugin | `android/.../tracking/RunTrackerPlugin.kt` | Capacitor plugin `RunTracker` (start, pause, resume, stop, getState, clear, speak, rate). |
 | Service | `android/.../tracking/RunTrackerService.kt` | Foreground service: GPS, wake lock, notification (Pause/Finish; during a Tune-In run, the pace to aim for and yours), TTS, snapshot to disk every 10 s. |

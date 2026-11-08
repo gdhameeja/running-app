@@ -2353,3 +2353,74 @@ summary.session-week-header > span:first-child { flex: 1; text-align: left; }
 .wr-work .wr-bad .material-icons { color: #e65100; }
 .wr-fitness { font-size: 30px; margin: 0 0 4px; }
 .wr-fitness small { font-size: 14px; color: #666; margin-left: 6px; }
+
+/* ─── Stats tab (stats-ui.js) ────────────────────────────────────────────── */
+#tab-stats { text-align: left; }
+.st-switch { display: flex; gap: 6px; margin: 4px 0 10px; }
+.st-chip { flex: 1; padding: 8px 0; border: 1px solid #c5cae9; border-radius: 18px; background: #fff; color: #3f51b5; font: inherit; font-size: 14px; box-shadow: none; }
+.st-chip.on { background: #3f51b5; color: #fff; border-color: #3f51b5; }
+.st-sections { position: sticky; top: 0; z-index: 5; background: #fafafa; padding: 6px 0; border-bottom: 1px solid #e1e0d9; }
+.st-tab { flex: 1; padding: 10px 0; border: none; border-bottom: 3px solid transparent; background: none; color: #52514e; font: inherit; font-weight: 600; box-shadow: none; border-radius: 0; }
+.st-tab.on { color: #3f51b5; border-bottom-color: #3f51b5; }
+.st-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 8px; }
+.st-card { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 12px; border: 1px solid #e8e8e8; border-radius: 12px; background: #fff; color: #0b0b0b; font: inherit; text-align: left; box-shadow: none; }
+.st-card b { font-size: 26px; font-weight: 700; }
+.st-card span { color: #52514e; font-size: 14px; }
+.st-delta { color: #898781; font-size: 12px; }
+.st-recap { background: #e8eaf6; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+.st-recap h3 { margin: 0 0 4px !important; }
+.st-recap p { margin: 0 0 4px; line-height: 1.4; }
+.st-note { color: #52514e; font-size: 14px; line-height: 1.4; margin: -10px 0 12px; }
+h3 + .st-note, .st-legend + .st-note { margin-top: 0; }
+.st-table { margin: -6px 0 14px; font-size: 13px; }
+.st-table summary { color: #3f51b5; cursor: pointer; }
+.st-stack { display: flex; gap: 2px; height: 22px; border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
+.st-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; color: #52514e; margin-bottom: 8px; }
+.st-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.st-predict td small { color: #898781; }
+.st-route, .st-record { border: 1px solid #e8e8e8; border-radius: 10px; background: #fff; color: #0b0b0b; font: inherit; text-align: left; box-shadow: none; }
+.st-route { display: flex; flex-direction: column; width: 100%; padding: 10px 12px; margin-bottom: 6px; }
+.st-route span { color: #52514e; font-size: 13px; }
+.st-records { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.st-record { display: flex; flex-direction: column; padding: 10px; }
+.st-record small { color: #52514e; font-size: 12px; }
+.st-record b { font-size: 18px; margin: 2px 0; }
+.st-record span { color: #898781; font-size: 12px; }
+.st-record:disabled { opacity: 1; }
+.st-shoe, .st-bar { display: grid; grid-template-columns: 30% 1fr auto; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 14px; }
+.st-shoe small, .st-bar small { color: #52514e; font-size: 12px; }
+.st-meter { height: 10px; background: #f0efec; border-radius: 4px; overflow: hidden; }
+.st-meter i { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+.st-ladder { display: grid; grid-template-columns: 40% 1fr; gap: 2px 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0efec; }
+.st-ladder > div:first-child { display: flex; flex-direction: column; }
+.st-ladder small { color: #52514e; font-size: 12px; }
+.st-ladder > small { grid-column: 2; }
+.st-steps { display: flex; gap: 2px; }
+.st-steps i { flex: 1; height: 10px; border-radius: 3px; background: #f0efec; }
+.st-steps i.on { background: #184f95; }
+.st-steps i.up { background: #eb6834; }
+.st-cal-wrap { overflow-x: auto; padding-bottom: 4px; }
+.st-cal-months { display: grid; grid-template-columns: repeat(53, 12px); gap: 2px; font-size: 10px; color: #898781; height: 14px; }
+.st-cal-months span { white-space: nowrap; }
+.st-cal { display: grid; grid-template-columns: repeat(53, 12px); gap: 2px; }
+.st-cal > div { display: grid; grid-template-rows: repeat(7, 12px); gap: 2px; }
+.st-cal i { width: 12px; height: 12px; border-radius: 3px; background: #f0efec; }
+.st-cal i.future { background: transparent; }
+.st-pattern { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.st-pattern p { margin: 0 0 2px; font-weight: 600; }
+.st-pattern small { color: #898781; }
+.st-life { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 8px; }
+.st-life div { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; }
+.st-life b { font-size: 24px; }
+.st-life small { color: #52514e; }
+/* Stats buttons: not the app's default raised indigo button */
+.st-chip, .st-tab, .st-card, .st-record, .st-route { margin: 0; min-width: 0; transition: none; }
+.st-chip:hover, .st-chip:focus { background: #fff; }
+.st-chip.on:hover, .st-chip.on:focus { background: #3f51b5; }
+.st-tab:hover, .st-tab:focus, .st-tab:disabled { background: none; }
+.st-card:hover, .st-route:hover, .st-record:hover, .st-record:disabled { background: #fff; color: #0b0b0b; }
+.plan-day, .plan-goal { margin: 0; min-width: 0; }
+.plan-day:hover, .plan-goal:hover { background: #fff; }
+.plan-day.on:hover, .plan-goal.on:hover { background: #3f51b5; }
+.st-note { margin: 4px 0 14px; }
+#tab-stats .chart-container { margin-bottom: 6px; }

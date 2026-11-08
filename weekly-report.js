@@ -611,7 +611,7 @@ const WeeklyReport = (() => {
         });
     }
 
-    return { VERSION, monday, addWeeks, dayKey, median, tier, tally, toWorkOn, load, briskMinutes, steady, cleanHeartRate, longRun, effortDrift, restingHeartRate, sleepSummary, consistency, isBlockWeek, build };
+    return { VERSION, monday, addWeeks, dayKey, median, tier, tally, toWorkOn, load, briskMinutes, steady, cleanHeartRate, adjustedSpeed, longRun, effortDrift, restingHeartRate, sleepSummary, consistency, isBlockWeek, build };
 })();
 
 if (typeof module !== "undefined") module.exports = WeeklyReport;

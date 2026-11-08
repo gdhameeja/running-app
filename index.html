@@ -100,40 +100,58 @@
             <div id="ghost-race-content"></div>
         </div>
 
-        <!-- ═══ STATS TAB ═══ -->
+        <!-- ═══ STATS TAB (stats-ui.js) ═══ -->
         <div class="tab-content" id="tab-stats">
             <div id="stats-empty" style="display:none;">
                 <p>No run data yet. Complete some runs to see your stats!</p>
             </div>
             <div id="stats-content">
-                <h3>Pace Trend</h3>
-                <div id="pace-chart-container" class="chart-container">
-                    <canvas id="paceChart"></canvas>
-                </div>
+                <div id="st-recap"></div>
+                <div class="st-switch" id="st-periods" role="group" aria-label="Period"></div>
+                <div id="st-cards" class="st-cards"></div>
+                <div class="st-switch st-sections" id="st-sections" role="tablist" aria-label="Section"></div>
 
-                <h3>Weekly Volume</h3>
-                <div class="chart-container">
-                    <canvas id="volumeChart"></canvas>
-                </div>
+                <section id="st-running" class="st-section">
+                    <div id="st-flat"></div>
+                    <div id="st-eff"></div>
+                    <div id="st-intensity"></div>
+                    <div id="st-effort"></div>
+                    <h3>Weekly volume</h3>
+                    <div class="chart-container"><canvas id="volumeChart"></canvas></div>
+                    <h3>Personal bests</h3>
+                    <div id="personal-bests" class="pb-grid"></div>
+                    <div id="st-predict"></div>
+                    <div id="st-routes"></div>
+                    <div id="st-fun"></div>
+                    <div id="st-shoes"></div>
+                </section>
 
-                <h3>Personal Bests</h3>
-                <div id="personal-bests" class="pb-grid"></div>
+                <section id="st-strength" class="st-section">
+                    <div id="st-ladders"></div>
+                    <div id="st-balance"></div>
+                    <div id="st-calf"></div>
+                    <div id="strength-stats"></div>
+                    <div id="walk-stats"></div>
+                </section>
 
-                <div id="vo2max-section" style="display:none;">
-                    <h3>Estimated VO2max</h3>
-                    <div class="vo2max-card">
-                        <span id="vo2max-value" class="vo2max-number"></span>
-                        <span class="vo2max-unit">ml/kg/min</span>
+                <section id="st-you" class="st-section">
+                    <div id="st-calendar"></div>
+                    <div id="st-records"></div>
+                    <div id="st-patterns"></div>
+                    <div id="vo2max-section" style="display:none;">
+                        <h3>Fitness</h3>
+                        <div class="vo2max-card">
+                            <span id="vo2max-value" class="vo2max-number"></span>
+                            <span class="vo2max-unit">ml/kg/min VO2max</span>
+                        </div>
+                        <p class="vo2max-note">From your predicted 5K: your best recent run of 1.5 km or more</p>
+                        <div id="st-fitage"></div>
                     </div>
-                    <p class="vo2max-note">From your predicted 5K: your best recent run of 1.5 km or more</p>
-                </div>
-
-                <div id="week-reports"></div>
-                <div id="strength-stats"></div>
-                <div id="walk-stats"></div>
-
-                <h3>Course Progress</h3>
-                <div id="course-progress-stats"></div>
+                    <div id="st-lifetime"></div>
+                    <div id="week-reports"></div>
+                    <h3>Course progress</h3>
+                    <div id="course-progress-stats"></div>
+                </section>
             </div>
         </div>
     </div>
@@ -284,6 +302,8 @@
     <script src="weekly-report-ui.js"></script>
     <script src="training-plan.js"></script>
     <script src="today-ui.js"></script>
+    <script src="stats.js"></script>
+    <script src="stats-ui.js"></script>
     <script src="run-detail.js"></script>
     <script src="ar-math.js"></script>
     <script src="ar-ghost.js"></script>
