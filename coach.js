@@ -420,6 +420,19 @@ const TuneInPlanner = (() => {
         return r.distance * RA.hillFactor(r) / r.time * (1 + RA.heatSlowdown(r.weather));
     }
 
+    // Predicted 5K pace (s/km) from runs counted as if flat and cool (same window and
+    // rules as RunAnalysis.fiveKPace), then put on a route with `hillFactor` in `heat`
+    function fiveKToday(runs, now, hillFactor, heat) {
+        const RA = analysis();
+        const ok = runs.filter(r => r.endTime && r.startTime < now && r.distance >= 1500 && r.time > 0 && !r.activity &&
+            r.time / (r.distance / 1000) >= RA.MIN_PACE);
+        const recent = ok.filter(r => r.startTime > now - WINDOW_DAYS * DAY_MS);
+        const use = recent.length ? recent : ok;
+        if (!use.length) return null;
+        const best = Math.min(...use.map(r => r.distance / normalSpeed(r) * Math.pow(5000 / r.distance, 1.06)));
+        return best / 5 * hillFactor * (1 + heat);
+    }
+
     // Usual speed (m/s, flat and cool): recency-weighted mean, leaving out runs 15%+ off the median
     function usualSpeed(runs) {
         const speeds = runs.map(normalSpeed);
@@ -542,13 +555,21 @@ const TuneInPlanner = (() => {
         const parts = layout(tpl, mainS);
         const easyV = usual * 0.87;
         const p5 = analysis().fiveKPace(runs, now);
+        // The cap on the same footing as `usual`: your 5K as if flat and cool, then
+        // on your usual route in today's weather (a raw 5K from hot-weather runs
+        // would sit below a heat-adjusted usual and flatten every target to it)
+        const p5Today = fiveKToday(runs, now, hillFactor, heat) || p5;
 
-        // Never ask for an average beyond 5K pace, but never slower than usual either
-        let v = usual * (1 + step);
-        if (p5) v = Math.max(usual, Math.min(v, 1000 / (p5 * AVG_CAP)));
-        const solved = solve(parts, v, easyV, (seconds) => capSpeed(p5, seconds));
+        // The step you've earned, never past 5K pace nor below your usual; then how
+        // you feel: tired eases off even when the cap is what's holding you back,
+        // fresh adds a little but still never past 5K pace
+        const capV = p5Today ? 1000 / (p5Today * AVG_CAP) : Infinity;
+        const want = usual * (1 + learned.step + (FEEL_STEP[feel] || 0));
+        const earned = Math.max(usual, Math.min(usual * (1 + learned.step), capV));
+        const v = Math.min(earned * (1 + (FEEL_STEP[feel] || 0)), Math.max(capV, usual));
+        const solved = solve(parts, v, easyV, (seconds) => capSpeed(p5Today, seconds));
         const paces = solved.speeds.map(x => 1000 / x);
-        const capped = solved.capped || v < usual * (1 + step);
+        const capped = solved.capped || v < want - 1e-9;
 
         const round5 = (x) => Math.round(x / 5) * 5;
         const seg = (role, seconds, pace) => ({
@@ -571,7 +592,7 @@ const TuneInPlanner = (() => {
         const total = Math.round((WARMUP_S + mainS + COOLDOWN_S) / 60);
         return {
             ready: true,
-            info: Object.assign({ about: tpl.about, mainMin: mainS / 60, totalMin: total, last: learned.last, p5 }, tuneIn),
+            info: Object.assign({ about: tpl.about, mainMin: mainS / 60, totalMin: total, last: learned.last, p5: p5Today }, tuneIn),
             session: {
                 title: `Tune-In: ${tpl.name}`, type: "tune",
                 description: `${total} min · ${mainS / 60} min main set averaging ${coachPace(targetPace)} /km`,

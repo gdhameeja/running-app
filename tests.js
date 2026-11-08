@@ -943,6 +943,15 @@ console.log("\n=== Run Data Tests ===\n");
     const hot = TuneInPlanner.plan(flatRuns, now, "normal", { tempC: 31, feelsC: 33 }).info;
     assert(hot.targetPace > base.targetPace * 1.04 && hot.heat === 0.06, `Hot today: target eased (${hot.targetPace.toFixed(0)} vs ${base.targetPace.toFixed(0)} s/km)`);
 
+    // Summer: every run in 36°C, a best 5K a little quicker than usual; today a cooler 30°C. The 5K
+    // cap must be heat-adjusted like "usual", or every feel lands on the same target
+    const summer = [...fakeRuns(8, 5, 434, now), ...fakeRuns(1, 5, 425, now - 30 * 86400000)].map(r => Object.assign({}, r, { weather: { feelsC: 36 } }));
+    const today = { tempC: 29, feelsC: 30 };
+    const [st, sn, sf] = ["tired", "normal", "fresh"].map(f => TuneInPlanner.plan(summer, now, f, today).info);
+    assert(st.targetPace > sn.targetPace + 3 && sn.targetPace < sn.usualPace - 3 && sf.targetPace <= sn.targetPace,
+        `Hot runs, cooler day: tired ${st.targetPace.toFixed(0)}, normal ${sn.targetPace.toFixed(0)}, fresh ${sf.targetPace.toFixed(0)} s/km (fresh stops at 5K pace)`);
+    assert(sn.p5 < sn.usualPace, "The 5K cap is on today's footing, quicker than usual");
+
     // A Tune-In hit on pace, but with heart rate near max: the next one doesn't step up
     const plan = TuneInPlanner.plan(flatRuns, now);
     const tune = plan.session.tuneIn;

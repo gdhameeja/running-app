@@ -1409,7 +1409,7 @@ function renderTuneInCard() {
         }
         el.innerHTML = `<div class="tunein-card ready">${head}
             <div class="tunein-target"><b>${formatPace(i.targetPace)}</b> /km<small>average for the ${i.mainMin}-min main set</small></div>
-            <p class="tunein-why">Your usual pace is ${formatPace(i.usualPace)} /km (last ${i.runsUsed} runs). Today: ${pct > 0 ? `${pct}% quicker` : "your usual average"}${i.capped ? ", held back by your 5K fitness" : ""}.${last}</p>
+            <p class="tunein-why">Your usual pace is ${formatPace(i.usualPace)} /km (last ${i.runsUsed} runs). Today: ${pct > 0 ? `${pct}% quicker` : pct < 0 ? `${-pct}% easier, as you're tired` : "your usual average"}${i.capped && i.feel !== "tired" ? `, held back by your 5K fitness${i.feel === "fresh" ? " (fresh can't go past it)" : ""}` : ""}.${last}</p>
             <div class="tunein-feel" role="group" aria-label="How do you feel today?">${feelButtonsHtml()}</div>
             ${!f.feel && f.suggested ? `<p class="tunein-why">Suggested from your watch: ${escapeHtml(f.why || "")}.</p>` : ""}
             ${i.heat > 0.005 ? `<p class="tunein-why">🌡️ ${Math.round(i.weather.feelsC ?? i.weather.tempC)}°C feels-like right now: target ${Math.round(i.heat * 100)}% easier for the heat.</p>` : ""}
