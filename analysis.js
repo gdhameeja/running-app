@@ -615,6 +615,42 @@ const RunAnalysis = (() => {
         return out;
     }
 
+    // ─── GPX ─────────────────────────────────────────────────────────────────
+
+    // The run as a GPX 1.1 file, with heart rate and cadence where known
+    // (Garmin's TrackPointExtension, which Strava reads). Null without a track.
+    function toGpx(run) {
+        const track = run && run.track;
+        if (!track || track.length < 2) return null;
+        const esc = (t) => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+        const hr = (run.hr && run.hr.samples) || [];
+        let h = 0;
+        const hrAt = (wall) => {
+            if (!hr.length) return null;
+            while (h + 1 < hr.length && Math.abs(hr[h + 1][0] - wall) <= Math.abs(hr[h][0] - wall)) h++;
+            return Math.abs(hr[h][0] - wall) <= 15000 ? hr[h][1] : null;
+        };
+        const points = track.map(p => {
+            const wall = wallOffset(run, p[0]);
+            const time = new Date(run.startTime + wall).toISOString();
+            const bpm = hrAt(wall);
+            const cad = cadenceBetween(run, p[0] - 15000, p[0]);
+            const ext = bpm != null || cad != null
+                ? `<extensions><gpxtpx:TrackPointExtension>${bpm != null ? `<gpxtpx:hr>${Math.round(bpm)}</gpxtpx:hr>` : ""}${cad != null ? `<gpxtpx:cad>${Math.round(cad / 2)}</gpxtpx:cad>` : ""}</gpxtpx:TrackPointExtension></extensions>` : "";
+            return `<trkpt lat="${p[2]}" lon="${p[3]}">${p[6] != null ? `<ele>${p[6]}</ele>` : ""}<time>${time}</time>${ext}</trkpt>`;
+        });
+        const type = run.activity === "walk" ? "walking" : "running";
+        const name = run.activity === "walk" ? "Walk" : (run.guided && run.guided.title) || "Run";
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Run Tracker" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1">
+<metadata><time>${new Date(run.startTime).toISOString()}</time></metadata>
+<trk><name>${esc(name)}</name><type>${type}</type><trkseg>
+${points.join("\n")}
+</trkseg></trk>
+</gpx>
+`;
+    }
+
     // ─── Formatting / parsing ────────────────────────────────────────────────
 
     // "24:59" or "1:05:00" to ms; null if it doesn't parse. Phone number pads
@@ -648,7 +684,7 @@ const RunAnalysis = (() => {
         sparseSeries, completeSeries, bestEffort, runBestEffort, sliceSeries, kmSplits, findStops, paceSegments, quantile, metres,
         routeSignature, coverage, sameRoute, groupRoutes, rankRoute,
         ghostCue, spokenMetres, CUE_EVERY_M,
-        MIN_PACE, fiveKPace, vo2max, segmentTarget, guidedReport, parseDuration, formatDistance, trimRun,
+        MIN_PACE, toGpx, fiveKPace, vo2max, segmentTarget, guidedReport, parseDuration, formatDistance, trimRun,
         minettiFactor, flatMetres, hillFactor, heatSlowdown, wallOffset, hrBetween, cadenceBetween,
     };
 })();

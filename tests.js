@@ -1372,7 +1372,18 @@ function gym(day, weight, target, done, ex = benchEx) {
     t = SP.target(push, [on(1, 3, 11, [12, 12, 11])]);
     assert(t.action === "rep" && t.level === 3 && t.reps === 12, "All sets must reach the top before moving up");
     t = SP.target(push, [on(1, 5, 12, [12, 12, 12])]);
-    assert(t.action === "rep" && t.level === 5 && t.reps === 13, "Top of the ladder: reps keep climbing");
+    assert(t.action === "load" && t.level === 5 && t.reps === 12 && /backpack/.test(t.why), "Top of the ladder: reps stop at the top of the range, and it asks for load instead");
+    t = SP.target(push, [on(1, 5, 10, [10, 10, 10])]);
+    assert(t.action === "rep" && t.reps === 11, "Top of the ladder: reps still climb up to the top of the range");
+    // A last rung with its own range: Nordic lowers are 3-6, not 6-12
+    const curl = SP.PRESETS.find(p => p.id === "legcurl");
+    const curlAt = (level, reps) => ({ activity: "strength", startTime: 1, endTime: 2, exercises: [{ id: "legcurl", level, sets: reps.map(r => ({ weight: 0, reps: r, target: reps[0] })) }] });
+    t = SP.target(curl, [curlAt(2, [12, 12, 12])]);
+    assert(t.action === "harder" && t.variation === "Nordic lower, feet under the bed" && t.reps === 3, "Moving up to Nordic lowers starts at 3 reps");
+    t = SP.target(curl, [curlAt(3, [6, 6, 6])]);
+    assert(t.action === "load" && t.reps === 6, "Nordic lowers top out at 6");
+    t = SP.target(SP.PRESETS.find(p => p.id === "calftest"), []);
+    assert(t.action === "test" && t.reps === 25 && t.sets === 2, "The calf test asks for as many as you can, one leg a set");
 
     t = SP.target(push, [on(1, 3, 8, [8, 7, 6])]);
     assert(t.action === "hold" && t.reps === 8 && t.level === 3, "Missed once: same again");
@@ -1436,7 +1447,7 @@ function gym(day, weight, target, done, ex = benchEx) {
     assert(SP.DEFAULT_ROUTINES.every(r => kinds.every(k => r.exercises.some(e => SP.patternOf(e.id) === k))),
         "Every starter workout trains pushing, pulling, legs, back of the hips and core");
     assert(SP.DEFAULT_ROUTINES.every(r => r.exercises.length >= 5 && r.exercises.length <= 7), "Starter workouts are 5 to 7 exercises");
-    assert(SP.PRESETS.filter(p => p.group === "No equipment").every(p => SP.patternOf(p.id) !== "other" || p.id === "burpee" || p.id === "wallsit"),
+    assert(SP.PRESETS.filter(p => p.group === "No equipment").every(p => SP.patternOf(p.id) !== "other" || ["burpee", "wallsit", "shortfoot", "toeyoga", "balance", "calftest"].includes(p.id)),
         "Home exercises count towards a movement in the weekly report");
     const newOnes = ["beddip", "pike", "towelrow", "stepup", "lunge", "legcurl", "deadbug", "copenhagen"];
     assert(newOnes.every(id => SP.PRESETS.find(p => p.id === id).ladder.every(v => SP.how(v))), "Every step of the new exercises says how to do it");
@@ -1481,6 +1492,138 @@ function gym(day, weight, target, done, ex = benchEx) {
     assert(RunAnalysis.groupRoutes(others).length === 0, "...or your routes");
     const fast = Array.from({ length: 5 }, (_, i) => Object.assign(sampleRun(900, now - (i + 1) * 86400000), { activity: "walk" }));
     assert(TuneInPlanner.plan(fast, now).ready === false, "...or Tune-In's learning");
+})();
+
+// ─── The training plan (training-plan.js) ────────────────────────────────────
+
+(function testTrainingPlan() {
+    const TP = require("./training-plan.js");
+    const SP = require("./strength-plan.js");
+    const WR = require("./weekly-report.js");
+    const DAY = 86400000;
+    const at = (y, m, d, h = 9) => new Date(y, m, d, h).getTime();
+    const mon = at(2026, 10, 9, 0); // a Monday
+    const run = (t, km, min, extra = {}) => Object.assign({ runId: t, startTime: t, endTime: t + min * 60000, distance: km * 1000, time: min * 60, pace: min * 60 / km }, extra);
+    // Three weeks of 5-8 km runs, the longest 8 km
+    const runs = [];
+    for (let i = 1; i <= 9; i++) runs.push(run(mon - i * 2.5 * DAY, i % 3 === 0 ? 8 : 5, i % 3 === 0 ? 48 : 30));
+    const plan = TP.defaults(mon);
+    // Planned from Monday morning; `day` is only a label here
+    const ctx = (day, extra = {}) => Object.assign({ runs, now: mon + 9 * 3600000, p5: RunAnalysis.fiveKPace(runs, mon), feel: "normal", today: true }, extra);
+
+    // The week's shape
+    assert(plan.runDays.join() === "1,3,6" && plan.gymDays.join() === "0,4", "Suggested week: runs Tue/Thu/Sun, strength Mon/Fri");
+    const roles = TP.roles(plan.runDays, "fitter");
+    assert(roles[6] === "long" && Object.values(roles).filter(r => r === "quality").length === 1, "One long run and one harder session at three runs a week");
+    assert(Object.values(TP.roles([0, 1, 3, 5, 6], "fitter")).filter(r => r.startsWith("quality")).length === 2, "Two harder sessions at five runs a week");
+    assert(Object.values(TP.roles([1, 3, 6], "start")).every(r => r !== "quality"), "Starting out: no hard sessions at all");
+    [2, 3, 4, 5].forEach(n => {
+        const d = TP.defaults(mon, { runs: n, gym: 2 });
+        const long = Math.max(...d.runDays);
+        assert(!d.gymDays.includes((long + 6) % 7), `Strength is never the day before the long run (${n} runs a week)`);
+    });
+
+    // The long run: at most 10% past the longest in 30 days
+    const sunday = mon + 6 * DAY + 9 * 3600000;
+    const long = TP.dayPlan(plan, sunday, ctx(sunday));
+    const km = Number(/about ([\d.]+) km/.exec(long.title)[1]);
+    assert(long.role === "long" && km > 8 && km <= 8 * 1.1, `Long run grows, but no more than 10% past your longest in 30 days (${km} km after 8 km)`);
+    assert(/5,200 runners/.test(long.why), "...and says why");
+    const easier = TP.dayPlan(Object.assign({}, plan, { startedAt: mon - 3 * 7 * DAY }), sunday, ctx(sunday));
+    assert(/easier week/.test(easier.blockText) && Number(/about ([\d.]+) km/.exec(easier.title)[1]) < 8, "Every fourth week is easier, the long run shorter");
+
+    // Paces from the 5K, and only easy runs by feel
+    const thu = mon + 3 * DAY + 9 * 3600000;
+    const q = TP.dayPlan(Object.assign({}, plan, { startedAt: mon - 7 * DAY }), thu, ctx(thu));
+    assert(q.role === "quality" && q.session.segments.some(s => s.pace > 0), "The harder session has paces");
+    assert(q.session.segments.every(s => s.say), "Every part of a plan run says what to do");
+    const tue = mon + DAY + 9 * 3600000;
+    const easy = TP.dayPlan(plan, tue, ctx(tue));
+    assert(easy.role === "easy" && easy.session.segments.every(s => s.pace == null), "Easy runs have no pace target");
+    assert(RunAnalysis.guidedReport(run(tue, 5, 30, { timeSeries: [{ distance: 2500, time: 900000 }, { distance: 5000, time: 1800000 }] }), { segments: easy.session.segments }, 300).judged === 0, "...so they're never judged fast or slow");
+    const hot = TP.dayPlan(Object.assign({}, plan, { startedAt: mon - 7 * DAY }), thu, ctx(thu, { weather: { feelsC: 33 } }));
+    const p = (x) => x.session.segments.find(s => s.pace).pace;
+    assert(p(hot) > p(q) && hot.notes.some(n => /heat/.test(n)), "Heat slows the paces, and it says so");
+
+    // Adapting
+    const tired = TP.dayPlan(Object.assign({}, plan, { startedAt: mon - 7 * DAY }), thu, ctx(thu, { feel: "tired" }));
+    assert(tired.role === "easy" && /tired/.test(tired.why), "Tired: the hard session becomes an easy run");
+    const drift = TP.dayPlan(Object.assign({}, plan, { startedAt: mon - 7 * DAY }), thu, ctx(thu, { signals: { drift: true } }));
+    assert(drift.role === "easy", "Fatigue in the weekly report: the hard session becomes an easy run");
+    const sick = TP.dayPlan(Object.assign({}, plan, { sickUntil: thu + DAY }), thu, ctx(thu));
+    assert(sick.role === "easy" && sick.minutes <= 20 && /above the neck/.test(sick.about), "Unwell: short and easy, and only above the neck");
+    assert(TP.dayPlan(Object.assign({}, plan, { sickUntil: mon + 5 * DAY }), mon + 4 * DAY, ctx(mon + 4 * DAY)).kind === "rest", "Unwell: strength waits");
+    const later = mon + 28 * DAY + 3 * DAY + 9 * 3600000; // a Thursday, three weeks after the last run
+    const back = TP.dayPlan(Object.assign({}, plan, { startedAt: mon - 7 * DAY }), later, ctx(later, { now: later }));
+    assert(back.role === "easy" && back.minutes <= 25 && /first run in/.test(back.why), "Back after a break: an easy one first");
+    const backLong = TP.dayPlan(plan, later + 3 * DAY, ctx(later + 3 * DAY, { now: later, today: false }));
+    assert(!/km/.test(backLong.title), "...and no old long run to build on means a long run by time");
+    assert(TP.comeback(runs, mon + 20 * DAY) && !TP.comeback(runs, mon + DAY), "A session after six days or more is a comeback");
+
+    // A missed session isn't owed: Thursday's plan doesn't change because Tuesday was skipped
+    const thuWithout = TP.dayPlan(plan, thu, ctx(thu, { runs: runs.filter(r => r.startTime < mon) }));
+    assert(thuWithout.title === TP.dayPlan(plan, thu, ctx(thu)).title, "A missed run is dropped, not added to the next one");
+
+    // A race date: a taper, then the race
+    const race = Object.assign({}, plan, { goal: "10k", raceDate: mon + 19 * DAY + 9 * 3600000 }); // a Saturday
+    assert(/easing off/.test(TP.dayPlan(race, sunday, ctx(sunday)).blockText), "Two weeks out: the taper starts");
+    assert(TP.dayPlan(race, race.raceDate, ctx(race.raceDate)).role === "race", "Race day is race day");
+    assert(TP.dayPlan(race, mon + 20 * DAY + 9 * 3600000, ctx(mon + 20 * DAY, { today: false })).kind === "rest", "Race week: the race is the long run");
+
+    // This week only
+    const moved = Object.assign({}, plan, { weeks: { [WR.dayKey(mon)]: { runDays: [2, 4, 5], gymDays: [0] } } });
+    assert(TP.weekDays(moved, mon).runDays.join() === "2,4,5" && TP.weekDays(moved, mon + 7 * DAY).runDays.join() === "1,3,6", "Moving days changes one week only");
+
+    // Weekly target and streak: one skip allowed, freezes earned
+    const sess = (t) => run(t, 5, 30);
+    const weekOf = (m, n) => Array.from({ length: n }, (_, i) => sess(m + i * DAY + 9 * 3600000));
+    const p0 = Object.assign({}, plan, { startedAt: mon - 8 * 7 * DAY });
+    let hist = [];
+    for (let w = 8; w >= 1; w--) hist = hist.concat(weekOf(mon - w * 7 * DAY, 4)); // 4 of 5 each week
+    let st = TP.streak(p0, hist, mon + DAY);
+    assert(st.streak === 8 && st.freezes === 2, `One short of the target still keeps the week; a freeze every four weeks (${st.streak}, ${st.freezes})`);
+    hist = hist.filter(r => r.startTime < mon - 3 * 7 * DAY || r.startTime >= mon - 2 * 7 * DAY); // a blank week
+    st = TP.streak(p0, hist, mon + DAY);
+    assert(st.streak === 7 && st.freezes === 0, "A missed week uses a freeze instead of breaking the streak");
+    st = TP.streak(p0, hist.filter(r => r.startTime < mon - 6 * 7 * DAY), mon + DAY);
+    assert(st.streak === 0, "Weeks missed with no freezes left: back to zero");
+    const paused = new Set([mon - 7 * DAY]);
+    st = TP.streak(p0, hist.filter(r => r.startTime < mon - 7 * DAY), mon + DAY, paused);
+    assert(st.streak > 0, "A week marked ill or away doesn't break it");
+    const light = Object.assign(sess(mon + 9 * 3600000), { activity: "strength", light: true, distance: 0 });
+    assert(TP.streak(p0, [light], mon + DAY).done === 0, "Foot core doesn't count as a session");
+
+    // Paces move only when you say so
+    const anchored = Object.assign({}, plan, { p5: 400, p5At: mon - 30 * DAY });
+    const quick = runs.concat([run(mon - DAY, 5, 25, { guided: { plan: { role: "quality" } } }), run(mon - 2 * DAY, 5, 25, { guided: { plan: { role: "quality" } } })]);
+    const sug = TP.paceSuggestion(anchored, quick, mon);
+    assert(sug && sug.faster && sug.p5 < 400, "Quicker runs: it offers quicker paces");
+    assert(TP.dayPlan(Object.assign({}, anchored, { startedAt: mon - 7 * DAY }), thu, Object.assign(ctx(thu), { runs: quick, p5: anchored.p5 })).session.segments.some(s => s.pace >= 400), "...but uses the old ones until you agree");
+    assert(TP.paceSuggestion(Object.assign({}, anchored, { p5SnoozeUntil: mon + DAY }), quick, mon) === null, "\"Not now\" waits");
+    assert(TP.paceSuggestion(Object.assign({}, anchored, { p5At: mon }), quick, mon + DAY) === null, "Needs two harder sessions since the last change");
+
+    // Reminders: the next planned session not yet done
+    const r1 = TP.nextReminder(plan, { runs, now: mon + 8 * 3600000 });
+    assert(r1 && new Date(r1.at).getDay() === 1, "Reminder: Monday's strength, if nothing's logged");
+    const doneMon = runs.concat([Object.assign(sess(mon + 7 * 3600000), { activity: "strength" })]);
+    const r2 = TP.nextReminder(plan, { runs: doneMon, now: mon + 8 * 3600000 });
+    assert(r2 && new Date(r2.at).getDay() === 2, "Done already: the reminder moves on to Tuesday");
+
+    // The gym plan, version 3
+    const v2 = { routines: [
+        { id: "fb-a", title: "Full body A", exercises: "push,squat,packrow,bridge,beddip,plank".split(",").map(id => ({ id })) },
+        { id: "mine", title: "Mine", exercises: [{ id: "push" }] },
+    ], plan: 2 };
+    const up = SP.upgradeRoutines(v2);
+    assert(up.routines.map(r => r.id).join() === "mine,fb-a,fb-b,fb-c" && up.routines[1].exercises[0].id === "hops", "Last version's untouched starters are replaced; yours stay");
+    assert(SP.freshen({ id: "calf", sets: 4, restSec: 30 }).ladder.length === 3 && SP.freshen({ id: "calf", sets: 4, restSec: 30 }).sets === 4, "Saved exercises get the new ladder steps, keeping your sets");
+    assert(SP.upNext(SP.DEFAULT_ROUTINES, [{ activity: "strength", title: "Full body A", startTime: 1, endTime: 2 }, { activity: "strength", title: "Foot core", light: true, startTime: 3, endTime: 4 }]) === 1, "Foot core doesn't move the A, B, C turn");
+    const weekTally = WR.tally([Object.assign(sess(mon + 9 * 3600000), { activity: "strength", light: true, exercises: [] })], mon);
+    assert(weekTally.strengthDays === 0, "The weekly report doesn't count foot core as a strength day");
+
+    // The pace coach speaks a plan's own words
+    const coach = new PaceCoach([{ role: "cruise", pace: 300, durationMs: 300000, say: "Rep 1 of 3. 5 minutes at 5 minutes per kilometre." }]);
+    assert(coach.startSegment(0, 0, 0)[0] === "Rep 1 of 3. 5 minutes at 5 minutes per kilometre.", "The coach reads a plan run's own cue");
 })();
 
 // ─── Storage and sync: real IndexedDB (in memory), a fake Supabase ───────────

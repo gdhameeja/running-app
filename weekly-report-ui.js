@@ -100,7 +100,20 @@ const WeekReport = (() => {
             ${r.review ? `<div class="wr-card"><h3>Four weeks against the four before</h3>
                 <table class="wr-table wr-review">${r.review.map(x => `<tr><td>${escapeHtml(x.label)}</td><td>${escapeHtml(x.text)}</td></tr>`).join("")}</table>
                 <p class="wr-minor">One week can't show a change in fitness, so it's only judged here. Pace allows for hills and heat.</p></div>` : ""}
-            ${note}${foot}`;
+            ${planHtml(r)}${note}${foot}`;
+    }
+
+    // The "plan this week" step: the week ahead from your plan, and a way to move days
+    function planHtml(r) {
+        if (r.weekStart !== latestWeek()) return "";
+        const monday = WeeklyReport.addWeeks(r.weekStart, 1);
+        const lines = Today.weekLines(monday);
+        if (!lines) return `<div class="wr-card"><h3>This week</h3><p>Set up a plan and the app will say what each day is for.</p>
+            <button class="btn-small" id="wr-plan">Plan my week</button></div>`;
+        return `<div class="wr-card"><h3>This week</h3>
+            <ul class="wr-week">${lines.map(l => `<li><b>${escapeHtml(l.name)}</b> ${escapeHtml(l.text)}</li>`).join("")}</ul>
+            <p class="wr-minor">Busy on one of those days? Move it now, before the week starts.</p>
+            <button class="btn-small" id="wr-plan" data-week="${monday}">Change this week's days</button></div>`;
     }
 
     function render() {
@@ -117,6 +130,11 @@ const WeekReport = (() => {
         const el = screen();
         const on = (id, ev, fn) => { const b = el.querySelector("#" + id); if (b) b.addEventListener(ev, fn); };
         on("wr-back", "click", () => close(false));
+        on("wr-plan", "click", (e) => {
+            const week = e.currentTarget.dataset.week;
+            close(false);
+            Today.openPlan(week ? { week: Number(week) } : {});
+        });
         el.querySelectorAll("[data-feeling]").forEach(b => b.addEventListener("click", () => {
             record.feeling = b.dataset.feeling;
             store().then(render);

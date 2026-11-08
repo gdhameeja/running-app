@@ -29,11 +29,15 @@ const Gym = (() => {
             req.onerror = (e) => reject(e.target.error);
         }).then(record => {
             if (!record) return copy(StrengthPlanner.DEFAULT_ROUTINES);
-            // Workouts saved before the full-body plan: bring it in, once
-            const upgraded = StrengthPlanner.upgradeRoutines(record);
-            if (!upgraded) return record.routines;
-            return saveCourseProgress(Object.assign({}, record, upgraded)).then(() => { CloudSync.soon(); return upgraded.routines; });
-        });
+            return withPlan(record);
+        }).then(list => list.map(r => Object.assign({}, r, { exercises: r.exercises.map(StrengthPlanner.freshen) })));
+    }
+
+    // Workouts saved before the current plan: bring it in, once
+    function withPlan(record) {
+        const upgraded = StrengthPlanner.upgradeRoutines(record);
+        if (!upgraded) return Promise.resolve(record.routines);
+        return saveCourseProgress(Object.assign({}, record, upgraded)).then(() => { CloudSync.soon(); return upgraded.routines; });
     }
 
     function saveRoutines() {
@@ -104,7 +108,7 @@ const Gym = (() => {
         if (isRunLive()) { alert("Finish your run before starting a workout."); return; }
         const feel = todayFeel();
         session = {
-            title: routine.title, startTime: Date.now(), at: 0, restEndsAt: null, holdEndsAt: null,
+            title: routine.title, light: routine.extra || undefined, startTime: Date.now(), at: 0, restEndsAt: null, holdEndsAt: null,
             items: routine.exercises.map(ex => ({
                 ex, target: StrengthPlanner.target(ex, past, feel.feel || feel.suggested || "normal"), done: [],
             })),
@@ -239,7 +243,7 @@ const Gym = (() => {
         // The draft goes only once this is safely stored. Put, not add: the app may
         // have died between the two last time.
         return updateRun({
-            runId: s.startTime, activity: "strength", title: s.title, startTime: s.startTime, endTime: end,
+            runId: s.startTime, activity: "strength", title: s.title, light: s.light, startTime: s.startTime, endTime: end,
             distance: 0, time: (end - s.startTime) / 1000, pace: 0, timeSeries: [], exercises,
             feel: todayFeel().feel || undefined,
         }).then(() => {
@@ -247,8 +251,9 @@ const Gym = (() => {
             CloudSync.soon();
             renderHomeRecent();
             renderButton();
+            if (typeof Today !== "undefined") Today.render();
             return shown() ? openPicker() : null;
-        }).then(() => showToast("Workout saved.", 2500), err => {
+        }).then(() => showToast(typeof Today !== "undefined" && Today.comebackFor(s.startTime) ? "Saved. Welcome back: that's the hardest one done." : "Workout saved.", 3000), err => {
             alert(`Couldn't save your workout: ${err && err.message || err}. It will be offered again next time you open the app.`);
             if (shown()) close();
         });
@@ -267,17 +272,26 @@ const Gym = (() => {
         const next = StrengthPlanner.upNext(routines, past);
         return `<div class="gym-list">
             <p class="gym-why">A full-body workout two or three times a week, taking them in turn. Leave a day between them.</p>
-            ${routines.map((r, i) => `
-            <div class="gym-card${i === next ? " gym-next" : ""}">
-                <div class="gym-card-head"><b>${escapeHtml(r.title)}</b>${i === next ? '<span class="gym-next-tag">Up next</span>' : ""}<button class="btn-small gym-edit" data-i="${i}">Edit</button></div>
+            ${routines.map((r, i) => cardHtml(r, i, i === next, f)).join("")}
+            <h3 class="gym-extras-head">Short extras</h3>
+            <p class="gym-why">Not part of the A, B, C turn, and they don't count as a strength day.</p>
+            ${StrengthPlanner.EXTRA_ROUTINES.map(r => cardHtml(r, null, false, f)).join("")}
+            <button class="btn-small" id="gym-add-routine">Add a workout</button>
+        </div>`;
+    }
+
+    function cardHtml(r, i, isNext, f) {
+        const about = { foot: "About 5 minutes. Best after an easy run, three times a week: it cut running injuries by more than half in a year-long trial.", calftest: "Once a month: how many single-leg calf raises you can do. Under 25 a leg means more calf work." }[r.id];
+        return `
+            <div class="gym-card${isNext ? " gym-next" : ""}">
+                <div class="gym-card-head"><b>${escapeHtml(r.title)}</b>${isNext ? '<span class="gym-next-tag">Up next</span>' : ""}${i == null ? "" : `<button class="btn-small gym-edit" data-i="${i}">Edit</button>`}</div>
+                ${about ? `<p class="gym-why">${about}</p>` : ""}
                 <ul class="gym-plan">${r.exercises.map(ex => {
                     const t = StrengthPlanner.target(ex, past, f);
                     return `<li><span>${escapeHtml(t.variation || ex.name)}</span><b>${targetText(t)}</b><small>${escapeHtml(t.why || "")}</small></li>`;
                 }).join("")}</ul>
-                <button class="up-next-start gym-start" data-i="${i}" ${r.exercises.length ? "" : "disabled"}><span class="material-icons">play_arrow</span> Start</button>
-            </div>`).join("")}
-            <button class="btn-small" id="gym-add-routine">Add a workout</button>
-        </div>`;
+                <button class="up-next-start gym-start" ${i == null ? `data-extra="${r.id}"` : `data-i="${i}"`} ${r.exercises.length ? "" : "disabled"}><span class="material-icons">play_arrow</span> Start</button>
+            </div>`;
     }
 
     function tweakHtml(i, field, text) {
@@ -389,7 +403,8 @@ const Gym = (() => {
             if (editing != null) return leaveEditor();
             close(); // a workout in progress keeps going; the Gym button reopens it
         });
-        el.querySelectorAll(".gym-start").forEach(b => b.addEventListener("click", () => start(routines[Number(b.dataset.i)])));
+        el.querySelectorAll(".gym-start").forEach(b => b.addEventListener("click", () =>
+            start(b.dataset.extra ? StrengthPlanner.EXTRA_ROUTINES.find(r => r.id === b.dataset.extra) : routines[Number(b.dataset.i)])));
         el.querySelectorAll(".gym-edit").forEach(b => b.addEventListener("click", () => { editing = Number(b.dataset.i); render(); }));
         on("gym-add-routine", () => {
             routines.push({ id: String(Date.now()), title: `Workout ${routines.length + 1}`, exercises: [] });
@@ -481,6 +496,25 @@ const Gym = (() => {
         return openPicker();
     }
 
+    // From the Today card: the workout that's up next, or an extra by id
+    function openAndStart(which) {
+        if (session) return open(); // one in progress: back to it
+        return open().then(() => {
+            if (!shown() || session) return;
+            const r = which === "next" ? routines[StrengthPlanner.upNext(routines, past)] : StrengthPlanner.EXTRA_ROUTINES.find(x => x.id === which);
+            if (r && r.exercises.length) start(r);
+        });
+    }
+
+    // What "Up next" is right now, for the Today card: { title, count } or null
+    function nextUp() {
+        return Promise.all([loadRoutines(), getAllRuns()]).then(([list, runs]) => {
+            const done = runs.filter(x => x.activity === "strength");
+            const r = list[StrengthPlanner.upNext(list, done)];
+            return r ? { title: r.title, count: r.exercises.length, names: r.exercises.map(e => e.name) } : null;
+        });
+    }
+
     function close(fromHistory) {
         clearInterval(ticker);
         screen().style.display = "none";
@@ -527,7 +561,7 @@ const Gym = (() => {
         leaveEditor();
     });
 
-    return { open, init, active: () => !!session, isOpen: shown };
+    return { open, openAndStart, nextUp, init, active: () => !!session, isOpen: shown };
 })();
 
 // Every set of a session, for its details page

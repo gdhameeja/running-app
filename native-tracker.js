@@ -46,6 +46,9 @@ const NativeTracker = (() => {
         // The Monday notification (weekly-report-ui.js)
         reportReminder: (at) => call("reportReminder", { at }),
         reportReminderOff: () => call("reportReminderOff"),
+        // The plan-day reminder (today-ui.js)
+        planReminder: (at, title, text) => call("planReminder", { at, title, text }),
+        planReminderOff: () => call("planReminderOff"),
         // AR ghost view (ar-ghost.js)
         startOrientation: () => call("startOrientation"),
         stopOrientation: () => call("stopOrientation"),
@@ -70,7 +73,7 @@ function startNativeRun() {
         guided: guidedRun ? {
             courseId: guidedRun.courseId, level: guidedRun.level, sessionIndex: guidedRun.sessionIndex,
             // A Tune-In run is planned on the spot, so it isn't in COURSES to look up again
-            session: guidedRun.courseId === TUNE_IN_ID ? guidedRun.session : undefined,
+            session: COURSES.some(c => c.id === guidedRun.courseId) ? undefined : guidedRun.session,
         } : null,
     };
     return NativeTracker.start({

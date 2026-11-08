@@ -51,6 +51,8 @@ let coachResults = null;
 let nextActivity = null;
 // What the one in progress is: null for a run
 let currentActivity = null;
+// Set just before Start to hide pace and distance on the run screen ("Just run")
+let nextJustRun = false;
 
 // ─── Course Progress DB ────────────────────────────────────────────────────────
 
@@ -95,6 +97,7 @@ function getCourseProgress(courseId) {
 
 // Turns the run screen into the finished run's summary.
 function displayRunSummary(run) {
+    runScreen().classList.remove("just-run");
     document.getElementById("distance").textContent = (run.distance / 1000).toFixed(2);
     document.getElementById("time").textContent = formatDuration(run.time);
     document.getElementById("pace").textContent = run.distance > 0 ? formatPace(run.pace) : "--:--";
@@ -120,6 +123,10 @@ function displayRunSummary(run) {
     getAllRuns().then(all => {
         const runs = all.filter(r => r.endTime);
         const lines = [];
+        // Coming back after a break is the hard part (Milkman 2021): say so
+        if (TrainingPlan.comeback(runs, run.startTime)) lines.push("👋 Welcome back. That's the hardest one done.");
+        const shoe = Today.shoeNote(run, runs);
+        if (shoe) lines.push(escapeHtml(shoe));
         const r = routeFor(findRoutes(runs), run.runId);
         if (r) {
             const n = r.route.ranked.entries.length;
@@ -137,6 +144,7 @@ function displayRunSummary(run) {
             lines.push(`Tune-In main set: ${formatPace(tune.pace)} /km vs target ${formatPace(tune.target)} · ${verdict}${tune.finished ? "" : " (ended early)"}.`);
         }
         summaryElement.querySelector(".summary-extra").innerHTML = lines.join("<br>");
+        Today.render();
     }).catch(() => {});
 }
 
@@ -156,6 +164,7 @@ document.addEventListener("DOMContentLoaded", () => {
             migrateRouteNames().catch(err => console.warn("Route names not moved:", err));
             if (!isRunLive()) Gym.init();
             WeekReport.init();
+            Today.init();
             renderHomeRecent();
             renderFeelPicker();
             updateHomeGpsWatch();
@@ -217,6 +226,7 @@ function initTabs() {
                 renderHomeRecent();
                 renderFeelPicker();
                 WeekReport.renderCards();
+                Today.render();
             }
             updateHomeGpsWatch();
         });
@@ -240,7 +250,10 @@ function workoutInTheWay() {
 document.getElementById("start").addEventListener("click", () => {
     const activity = nextActivity;
     nextActivity = null;
+    const justRun = nextJustRun;
+    nextJustRun = false;
     if (workoutInTheWay()) return;
+    runScreen().classList.toggle("just-run", justRun);
     document.getElementById("start").disabled = true;
     currentActivity = activity;
     if (window.speechSynthesis) speechSynthesis.cancel();
@@ -300,7 +313,10 @@ document.getElementById("start").addEventListener("click", () => {
                     courseId: guidedRun.courseId, level: guidedRun.level, sessionIndex: guidedRun.sessionIndex,
                     title: guidedRun.session.title, segments: guidedRun.segments,
                     tuneIn: guidedRun.session.tuneIn || undefined,
+                    plan: guidedRun.session.plan || undefined,
                 } : null,
+                // Which shoes, for their mileage (today-ui.js)
+                shoe: Today.shoeFor(activity) || undefined,
                 // How you felt going in, and what your watch said about last night (enrich.js)
                 feel: todayFeel().feel || undefined,
                 readiness: Enrich.readinessNow() || undefined,
@@ -1308,6 +1324,8 @@ function todayFeel() {
 function setTodayFeel(feel) {
     try { localStorage.setItem("todayFeel", JSON.stringify({ date: new Date().toDateString(), feel })); } catch (e) { /* storage unavailable */ }
     renderFeelPicker();
+    // Tired turns today's hard session into an easy one
+    if (typeof Today !== "undefined") Today.render();
 }
 
 // The Tired / Normal / Fresh chips; tap the chosen one again to clear it
@@ -1691,7 +1709,7 @@ function segmentLabel(seg) {
 
 function newCoach(segments) {
     return new PaceCoach(segments.map(s => ({
-        role: s.role, pace: s.pace, durationMs: Math.round(s.duration * 60) * 1000,
+        role: s.role, pace: s.pace, say: s.say, durationMs: Math.round(s.duration * 60) * 1000,
     })));
 }
 
@@ -1752,7 +1770,7 @@ function startGuidedSession(sess, courseId, levelKey, sessionIndex) {
     // Auto-enroll if not on this course. A session from another level than the
     // one you're enrolled at is a one-off: a second enrolment would never get ticked.
     getCourseProgress(courseId).then(progress => {
-        if (courseId !== TUNE_IN_ID && (!progress || progress.status !== "active")) {
+        if (COURSES.some(c => c.id === courseId) && (!progress || progress.status !== "active")) {
             return saveCourseProgress({
                 progressId: `${courseId}-${levelKey}-${Date.now()}`,
                 courseId, level: levelKey,

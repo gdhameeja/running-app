@@ -110,6 +110,8 @@ class PaceCoach(private val segments: List<GuidedSegment>) {
     }
 
     private fun announcement(s: GuidedSegment, pace: Double?): String {
+        // A plan session words its own parts (training-plan.js)
+        s.say?.let { return it }
         val d = spokenSeconds(s.durationSec)
         val p = pace?.let(::spokenPace) ?: ""
         return when (s.role) {

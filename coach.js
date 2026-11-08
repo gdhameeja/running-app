@@ -125,6 +125,8 @@ class PaceCoach {
     }
 
     announcement(s, pace) {
+        // A plan session words its own parts (training-plan.js)
+        if (s.say) return s.say;
         const d = spokenSeconds(Math.round(s.durationMs / 1000));
         const p = pace != null ? spokenPace(pace) : "";
         switch (s.role) {

@@ -194,6 +194,26 @@ ghosts, the pace chart, weekly volume) skips records with an `activity`.
   workouts (A, B, C), each with a push, a pull, legs, back of the hips and core, taken
   in turn: the picker marks the one after your last as "Up next". Workouts saved before
   it get the plan added once (`upgradeRoutines`); untouched old starters are replaced.
+  A and B open with hops (reps are foot contacts). On a ladder's last step reps stop at
+  the top of the range and it asks for a backpack or a slow lowering instead, since
+  more reps would train endurance, not strength. Foot core and the monthly calf test
+  are short extras saved with `light: true`: they don't move the A/B/C turn or count
+  as a strength day.
+
+## The plan (Today card)
+
+`training-plan.js` works out what each day is for from the `training-plan` record
+(run days, strength days, goal, optional race date); `today-ui.js` shows it at the top
+of the Run tab with the week as a strip. Easy runs by effort, one harder session a week
+(two at four or more runs), and a long run capped at 10% past your longest in the last
+30 days; four-week blocks with an easier fourth week; a two-week taper before a race.
+Tired, unwell ("Not feeling 100%"), fatigue in the weekly report, or back from a break
+make today easier. Paces come from the predicted 5K stored on the plan and change only
+when you accept the suggestion. Plan runs are guided sessions (`courseId: "plan"`)
+whose segments carry their own spoken `say`, which `PaceCoach` reads instead of its
+Tune-In phrases. One reminder alarm (`planReminder`, in `WeeklyReportReceiver`) always
+points at the next planned session not yet done; the page resets it on every change.
+Shoes (`shoes` record) give each run a `shoe`; run details can change it or export a GPX.
   Exercises with weights use kilos for rungs. Your workouts sync as the
   `strength-routines` record in the course progress store. `WorkoutService.kt` speaks
   rest timers and holds, so they carry on with the screen locked.

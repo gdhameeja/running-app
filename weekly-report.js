@@ -135,7 +135,8 @@ const WeeklyReport = (() => {
         const inWeek = sessions.filter(s => s.startTime >= start && s.startTime < end);
         const runs = inWeek.filter(isRun);
         const walks = inWeek.filter(s => s.activity === "walk");
-        const gyms = inWeek.filter(s => s.activity === "strength");
+        // The short extras (foot core, calf test) aren't a strength day
+        const gyms = inWeek.filter(s => s.activity === "strength" && !s.light);
         const rated = runs.filter(r => r.rpe > 0);
         const patterns = {};
         gyms.forEach(g => (g.exercises || []).forEach(e => {

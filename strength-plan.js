@@ -31,7 +31,7 @@ const StrengthPlanner = (() => {
         // Pulling with no bar: a backpack full of books. Add more books when you can
         ladder("packrow", "Backpack rows", ["Two-arm backpack row", "One-arm backpack row", "Slow one-arm backpack row"], 0, NO_EQUIPMENT, 8, 15, 75),
         ladder("back", "Back raises", ["Superman raise", "Reverse snow angel", "Prone Y raise"], 0, NO_EQUIPMENT, 8, 15, 60),
-        ladder("bridge", "Glute bridges", ["Glute bridge", "Single-leg glute bridge", "Feet-raised single-leg bridge"], 0, NO_EQUIPMENT, 8, 15, 60),
+        ladder("bridge", "Glute bridges", ["Glute bridge", "Single-leg glute bridge", "Feet-raised single-leg bridge", "Single-leg bridge, backpack on your hips"], 0, NO_EQUIPMENT, 8, 15, 60),
         ladder("legraise", "Leg raises", ["Bent-knee leg raise", "Leg raise"], 0, NO_EQUIPMENT, 8, 15, 60),
         ladder("calf", "Calf raises", ["Calf raise", "Single-leg calf raise", "Single-leg calf raise off a step"], 0, NO_EQUIPMENT, 12, 25, 45),
         ladder("burpee", "Burpees", ["Step-back burpee", "Burpee"], 0, NO_EQUIPMENT, 6, 15, 90),
@@ -42,12 +42,27 @@ const StrengthPlanner = (() => {
         // Round the house: a bed, a chair, the stairs, a towel and a door
         ladder("beddip", "Bed dips", ["Bent-knee bed dip", "Straight-leg bed dip", "Feet-raised bed dip", "Single-leg bed dip"], 0, NO_EQUIPMENT, 8, 15, 75),
         ladder("pike", "Pike push-ups", ["Hands-on-bed pike push-up", "Pike push-up", "Feet-on-bed pike push-up"], 0, NO_EQUIPMENT, 5, 12, 90),
-        ladder("towelrow", "Towel rows", ["Door towel row, standing tall", "Door towel row, leaning back", "One-arm door towel row"], 0, NO_EQUIPMENT, 8, 15, 75),
-        ladder("stepup", "Step-ups", ["Step-up onto a stair", "Step-up onto a chair", "Slow step-up onto a chair"], 0, NO_EQUIPMENT, 8, 15, 60),
-        ladder("lunge", "Lunges", ["Reverse lunge", "Forward lunge", "Reverse lunge off a step"], 0, NO_EQUIPMENT, 8, 15, 60),
-        ladder("legcurl", "Hamstring curls", ["Hamstring walkout", "Towel leg curl", "Single-leg towel leg curl", "Nordic lower, feet under the bed"], 0, NO_EQUIPMENT, 6, 12, 75),
+        ladder("towelrow", "Towel rows", ["Door towel row, standing tall", "Door towel row, leaning back", "One-arm door towel row", "One-arm towel row, backpack on"], 0, NO_EQUIPMENT, 8, 15, 75),
+        ladder("stepup", "Step-ups", ["Step-up onto a stair", "Step-up onto a chair", "Slow step-up onto a chair", "Backpack step-up onto a chair"], 0, NO_EQUIPMENT, 8, 15, 60),
+        ladder("lunge", "Lunges", ["Reverse lunge", "Forward lunge", "Reverse lunge off a step", "Backpack reverse lunge off a step"], 0, NO_EQUIPMENT, 8, 15, 60),
+        Object.assign(ladder("legcurl", "Hamstring curls", ["Hamstring walkout", "Towel leg curl", "Single-leg towel leg curl", "Nordic lower, feet under the bed"], 0, NO_EQUIPMENT, 6, 12, 75),
+            { rungReps: { 3: [3, 6] } }),
         ladder("deadbug", "Dead bugs", ["Heel-tap dead bug", "Dead bug", "Slow dead bug"], 0, NO_EQUIPMENT, 6, 12, 45),
-        hold("copenhagen", "Copenhagen plank", ["Copenhagen plank, knee on the bed", "Copenhagen plank, foot on the bed"], 0, 10, 30, 45),
+        hold("copenhagen", "Copenhagen plank", ["Side-lying inner-thigh lift", "Copenhagen plank, knee on the bed", "Copenhagen plank, foot on the bed"], 0, 10, 30, 45),
+        // The deep calf muscle (soleus) works hardest with the knee bent
+        ladder("soleus", "Bent-knee calf raises", ["Bent-knee calf raise", "Single-leg bent-knee calf raise", "Single-leg bent-knee calf raise off a step"], 0, NO_EQUIPMENT, 10, 20, 45),
+        // Side of the hip, for knees that track well
+        ladder("hipabd", "Side leg raises", ["Side-lying leg raise", "Side-lying leg raise, 2 s at the top", "Side-plank leg raise"], 0, NO_EQUIPMENT, 10, 20, 45),
+        // Springy feet: reps are foot contacts, 60-120 a session to start
+        Object.assign(ladder("hops", "Hops", ["Skipping on the spot", "Pogo hops", "Pogo hops, forward and back", "Single-leg pogo hops"], 0, NO_EQUIPMENT, 20, 40, 60),
+            { repStep: 5 }),
+        // Foot core (Taddei 2020): a few minutes, after easy runs
+        hold("shortfoot", "Short foot", ["Short foot, sitting", "Short foot, standing", "Short foot, on one leg"], 0, 10, 30, 15),
+        ladder("toeyoga", "Toe yoga", ["Toe yoga"], 0, NO_EQUIPMENT, 10, 20, 15),
+        hold("balance", "Single-leg balance", ["Single-leg balance", "Single-leg balance, eyes closed", "Single-leg balance on a cushion"], 0, 20, 45, 15),
+        // Once a month: how many single-leg calf raises you can do. 25 is a good benchmark
+        Object.assign(ladder("calftest", "Calf test", ["Single-leg calf raises, as many as you can"], 0, NO_EQUIPMENT, 25, 25, 90),
+            { sets: 2, test: true }),
         ladder("pull", "Pull-ups", ["Negative pull-up", "Chin-up", "Pull-up", "Archer pull-up"], 0, BAR_OR_TABLE, 3, 8, 120),
         ladder("row", "Table rows", ["Bent-knee table row", "Table row", "Feet-raised table row"], 0, BAR_OR_TABLE, 6, 12, 90),
         ladder("dip", "Dips", ["Chair dip", "Feet-raised chair dip", "Parallel bar dip"], 0, BAR_OR_TABLE, 6, 12, 90),
@@ -60,14 +75,23 @@ const StrengthPlanner = (() => {
     // push, a pull, a leg exercise, one for the back of the hips and one for the
     // core, so two sessions train everything twice. Single-leg work, hamstrings,
     // calves and the inner thigh are there for running.
-    const PLAN_VERSION = 2;
+    const PLAN_VERSION = 3;
     const DEFAULT_ROUTINES = [
-        { id: "fb-a", title: "Full body A", exercises: ["push", "squat", "packrow", "bridge", "beddip", "plank"].map(byId) },
-        { id: "fb-b", title: "Full body B", exercises: ["pike", "stepup", "towelrow", "legcurl", "calf", "sideplank"].map(byId) },
-        { id: "fb-c", title: "Full body C", exercises: ["beddip", "lunge", "towelrow", "back", "deadbug", "copenhagen"].map(byId) },
+        { id: "fb-a", title: "Full body A", exercises: ["hops", "push", "squat", "packrow", "bridge", "soleus", "plank"].map(byId) },
+        { id: "fb-b", title: "Full body B", exercises: ["hops", "pike", "stepup", "towelrow", "legcurl", "calf", "sideplank"].map(byId) },
+        { id: "fb-c", title: "Full body C", exercises: ["beddip", "lunge", "towelrow", "back", "hipabd", "copenhagen"].map(byId) },
+    ];
+    // Short extras, outside the A/B/C rotation and the weekly strength count
+    const EXTRA_ROUTINES = [
+        { id: "foot", title: "Foot core", extra: true, exercises: ["shortfoot", "toeyoga", "balance"].map(id => Object.assign({}, byId(id), { sets: 2 })) },
+        { id: "calftest", title: "Calf test", extra: true, exercises: [byId("calftest")] },
     ];
     // The starter workouts before PLAN_VERSION 2, as exercise ids
-    const OLD_DEFAULTS = { a: "push,squat,plank", b: "packrow,back,bridge,sideplank" };
+    const OLD_DEFAULTS = {
+        a: ["push,squat,plank"], b: ["packrow,back,bridge,sideplank"],
+        "fb-a": ["push,squat,packrow,bridge,beddip,plank"], "fb-b": ["pike,stepup,towelrow,legcurl,calf,sideplank"],
+        "fb-c": ["beddip,lunge,towelrow,back,deadbug,copenhagen"],
+    };
 
     // Saved workouts from before this plan: the old starters, if you never changed
     // them, give way to the new ones; anything of your own stays, with the new ones
@@ -75,15 +99,21 @@ const StrengthPlanner = (() => {
     function upgradeRoutines(record) {
         if (!record) return null;
         if (record.plan >= PLAN_VERSION) return null;
-        const mine = (record.routines || []).filter(r => OLD_DEFAULTS[r.id] !== r.exercises.map(e => e.id).join(","));
+        const mine = (record.routines || []).filter(r => !(OLD_DEFAULTS[r.id] || []).includes(r.exercises.map(e => e.id).join(",")));
         const extra = DEFAULT_ROUTINES.filter(d => !mine.some(r => r.id === d.id));
         return { routines: mine.concat(JSON.parse(JSON.stringify(extra))), plan: PLAN_VERSION };
+    }
+
+    // A saved exercise with today's preset ladder and rep range, keeping your sets and rest
+    function freshen(ex) {
+        const p = PRESETS.find(x => x.id === ex.id);
+        return p ? Object.assign({}, p, { sets: ex.sets, restSec: ex.restSec }) : ex;
     }
 
     // The workout after the one you did last, by title; the first if none match
     function upNext(routines, sessions) {
         if (!routines.length) return -1;
-        const last = sessions.filter(s => s.activity === "strength" && s.endTime).sort((a, b) => b.startTime - a.startTime)[0];
+        const last = sessions.filter(s => s.activity === "strength" && s.endTime && !s.light).sort((a, b) => b.startTime - a.startTime)[0];
         const i = last ? routines.findIndex(r => r.title === last.title) : -1;
         return i < 0 ? 0 : (i + 1) % routines.length;
     }
@@ -122,6 +152,29 @@ const StrengthPlanner = (() => {
         "Shrimp squat": "On one leg, holding the other foot behind you. Lower until your back knee touches the floor.",
         "Archer push-up": "Hands wide. Lower towards one hand while the other arm stays straight. Alternate sides.",
         "Long-lever plank": "A plank with your elbows further forward than your shoulders.",
+        "Side-lying inner-thigh lift": "Lie on your side, top foot on the bed or a chair, and lift the bottom leg up to meet it. Hold. If your groin hurts, stop and tap Easier next time.",
+        "Single-leg bridge, backpack on your hips": "The feet-raised single-leg bridge with a backpack of books resting on your hips.",
+        "One-arm towel row, backpack on": "The one-arm towel row wearing a backpack of books.",
+        "Backpack step-up onto a chair": "Step-ups onto a chair wearing a backpack of books. Reps are per leg.",
+        "Backpack reverse lunge off a step": "Reverse lunges off a stair wearing a backpack of books. Reps are per leg.",
+        "Bent-knee calf raise": "Stand with your knees bent about 30 degrees, a hand on the wall, and rise onto your toes. Keep the knees bent the whole time.",
+        "Single-leg bent-knee calf raise": "As before on one leg. Reps are per leg.",
+        "Single-leg bent-knee calf raise off a step": "On one leg on the edge of a stair, heel dropping below the step, knee bent. Reps are per leg.",
+        "Side-lying leg raise": "Lie on your side, bottom knee bent. Lift the straight top leg a little behind you, toes pointing forward, and lower slowly. Reps are per side.",
+        "Side-lying leg raise, 2 s at the top": "As before, holding two seconds at the top. Reps are per side.",
+        "Side-plank leg raise": "In a side plank, lift the top leg and lower it. Reps are per side.",
+        "Skipping on the spot": "Light, quick skips on the balls of your feet. Count each foot touching down.",
+        "Pogo hops": "Small, quick two-footed hops with stiff ankles, like a bouncing spring. Count each landing. Stop before you get sloppy.",
+        "Pogo hops, forward and back": "Pogo hops moving a few centimetres forward and back. Count each landing.",
+        "Single-leg pogo hops": "Pogo hops on one leg. Only once the calf test reaches 25 on each leg. Count each landing.",
+        "Short foot, sitting": "Feet flat, toes relaxed. Pull the ball of your foot towards your heel so the arch lifts, without curling your toes. Hold.",
+        "Short foot, standing": "The short foot standing up. Hold.",
+        "Short foot, on one leg": "The short foot standing on one leg. Hold.",
+        "Toe yoga": "Lift your big toe while the others stay down, then swap: big toe down, others up. Each swap is one rep.",
+        "Single-leg balance": "Stand on one leg, knee soft. Swap legs each set.",
+        "Single-leg balance, eyes closed": "As before with your eyes closed, near a wall.",
+        "Single-leg balance on a cushion": "Stand on one leg on a folded pillow or cushion.",
+        "Single-leg calf raises, as many as you can": "One leg on the floor, a fingertip on the wall. Rise all the way up and down at a steady pace until you can't. First set left leg, second set right.",
     };
     const how = (variation) => HOW[variation] || null;
 
@@ -132,6 +185,7 @@ const StrengthPlanner = (() => {
         squat: "legs", calf: "legs", barsquat: "legs",
         back: "hinge", bridge: "hinge", deadlift: "hinge",
         beddip: "push", pike: "push", stepup: "legs", lunge: "legs", legcurl: "hinge",
+        soleus: "legs", hops: "legs", hipabd: "hinge",
         plank: "core", sideplank: "core", hollow: "core", legraise: "core", deadbug: "core", copenhagen: "core",
         packrow: "pull", row: "pull", pull: "pull", barrow: "pull", curl: "pull", towelrow: "pull",
     };
@@ -172,6 +226,9 @@ const StrengthPlanner = (() => {
     // Every set you did reached its target, even if you skipped the rest
     const clean = (entry) => entry.sets.every(s => s.reps >= s.target);
 
+    // [low, high] reps at a rung: most share the exercise's range, a hard last rung may not
+    const range = (ex, level) => (ex.rungReps && ex.rungReps[level]) || [ex.repLow, ex.repHigh];
+
     const variationAt = (ex, level) => ex.ladder ? ex.ladder[Math.max(0, Math.min(level, ex.ladder.length - 1))] : null;
 
     // { weight (null: you pick), reps, sets, level, variation, unit, action, why }
@@ -183,27 +240,36 @@ const StrengthPlanner = (() => {
             weight, reps, level, sets: ex.sets, unit: ex.unit, variation: variationAt(ex, level), action, why,
         });
         const startLevel = ex.level || 0;
+        if (ex.test) return out(0, ex.repLow, 0, "test", "As many as you can, one leg each set. 25 or more is a good benchmark");
         if (!past.length) {
-            return out(ex.stepKg > 0 ? null : 0, ex.repLow, startLevel, "first", ex.stepKg > 0 ? "First time: pick a weight you could lift a few more times"
+            return out(ex.stepKg > 0 ? null : 0, range(ex, startLevel)[0], startLevel, "first", ex.stepKg > 0 ? "First time: pick a weight you could lift a few more times"
                 : ex.ladder ? "First time: tap Easier or Harder if this doesn't suit you" : "First time: see how it goes");
         }
 
         const last = past[0];
-        const weight = topWeight(last), reps = targetReps(last) || ex.repLow;
         const level = ex.ladder ? Math.min(last.level != null ? last.level : startLevel, ex.ladder.length - 1) : 0;
+        const [low, high] = range(ex, level);
+        const weight = topWeight(last), reps = targetReps(last) || low;
         const onLadder = !!ex.ladder;
+        const top = onLadder && level === ex.ladder.length - 1;
         if (hit(last, ex)) {
             if (feel === "tired") return out(weight, reps, level, "hold", "Feeling tired: same as last time");
             const fewest = fewestReps(last);
-            if (fewest >= ex.repHigh) {
+            if (fewest >= high) {
                 if (ex.stepKg > 0) return out(roundTo(weight + ex.stepKg, ex.stepKg), ex.repLow, level, "step", `Hit ${fewest} reps last time: up ${ex.stepKg} kg`);
-                if (onLadder && level < ex.ladder.length - 1) {
-                    return out(0, ex.repLow, level + 1, "harder", `Mastered ${variationAt(ex, level)}: moving up`);
+                if (onLadder && !top) {
+                    return out(0, range(ex, level + 1)[0], level + 1, "harder", `Mastered ${variationAt(ex, level)}: moving up`);
+                }
+                // More reps past here would train endurance, not strength
+                if (top) {
+                    return out(weight, high, level, "load", ex.unit === "s"
+                        ? "Top of the ladder: same time, harder. Wear a backpack of books, or hold it lower"
+                        : "Top of the ladder: same reps, harder. Wear a backpack of books, or take 3 seconds to lower");
                 }
             }
             // You may have done more than asked: build on that
             const more = Math.max(reps, fewest) + step;
-            const capped = ex.stepKg > 0 || (onLadder && level < ex.ladder.length - 1) ? Math.min(more, ex.repHigh) : more;
+            const capped = ex.stepKg > 0 || onLadder ? Math.min(more, high) : more;
             return out(weight, capped, level, "rep", `Hit it last time: ${capped - reps} more ${capped - reps === 1 ? word.slice(0, -1) : word}`);
         }
         // Short of time isn't short of strength: no step up, but no step back either
@@ -216,11 +282,12 @@ const StrengthPlanner = (() => {
         }
         if (misses < 2) return out(weight, reps, level, "hold", "Just missed last time: same again");
         if (ex.stepKg > 0) return out(roundTo(weight * BACK_OFF, ex.stepKg), ex.repLow, level, "back", "Missed twice: easing off to build back up");
-        if (onLadder && reps <= ex.repLow && level > 0) {
-            const middle = Math.round((ex.repLow + ex.repHigh) / 2 / step) * step;
+        if (onLadder && reps <= low && level > 0) {
+            const [lo, hi] = range(ex, level - 1);
+            const middle = Math.round((lo + hi) / 2 / step) * step;
             return out(0, middle, level - 1, "easier", `Missed twice: ${variationAt(ex, level - 1)} to build back up`);
         }
-        const floor = onLadder ? Math.min(ex.repLow, reps) : 1;
+        const floor = onLadder ? Math.min(low, reps) : 1;
         return out(0, Math.max(floor, reps - 2 * step), level, "back", `Missed twice: fewer ${word} to build back up`);
     }
 
@@ -229,7 +296,7 @@ const StrengthPlanner = (() => {
         if (!ex.ladder) return null;
         const level = t.level + by;
         if (level < 0 || level >= ex.ladder.length) return null;
-        return Object.assign({}, t, { level, variation: ex.ladder[level], reps: ex.repLow, action: "chosen", why: "" });
+        return Object.assign({}, t, { level, variation: ex.ladder[level], reps: range(ex, level)[0], action: "chosen", why: "" });
     }
 
     const spokenWeight = (kg) => `${kg} kilos`;
@@ -299,7 +366,7 @@ const StrengthPlanner = (() => {
         return (session.exercises || []).filter(e => e.unit === "s").reduce((sum, e) => sum + e.sets.reduce((a, s) => a + s.reps, 0), 0);
     }
 
-    return { PRESETS, GROUPS, DEFAULT_ROUTINES, PLAN_VERSION, upgradeRoutines, upNext, how, PATTERN_NAMES, patternOf, custom, target, change, spokenSet, restCues, holdCues, after, oneRepMax, volume, totalReps, totalHeld, progress };
+    return { PRESETS, GROUPS, DEFAULT_ROUTINES, EXTRA_ROUTINES, PLAN_VERSION, upgradeRoutines, freshen, range, upNext, how, PATTERN_NAMES, patternOf, custom, target, change, spokenSet, restCues, holdCues, after, oneRepMax, volume, totalReps, totalHeld, progress };
 })();
 
 if (typeof module !== "undefined") module.exports = StrengthPlanner;

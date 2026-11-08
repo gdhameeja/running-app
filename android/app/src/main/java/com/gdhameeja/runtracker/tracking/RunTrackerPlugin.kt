@@ -253,6 +253,21 @@ class RunTrackerPlugin : Plugin() {
         call.resolve()
     }
 
+    // ─── The plan-day reminder (today-ui.js) ─────────────────────────────────
+
+    @PluginMethod
+    fun planReminder(call: PluginCall) {
+        val at = call.getLong("at") ?: return call.reject("Missing at")
+        WeeklyReportReceiver.schedulePlan(context, at, call.getString("title") ?: "Today's plan", call.getString("text") ?: "")
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun planReminderOff(call: PluginCall) {
+        WeeklyReportReceiver.cancelPlan(context)
+        call.resolve()
+    }
+
     // ─── Health Connect (watch heart rate, sleep, resting HR; enrich.js) ─────
 
     private val health by lazy { HealthBridge(context) }
@@ -387,7 +402,7 @@ class RunTrackerPlugin : Plugin() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, name)
-                put(MediaStore.Downloads.MIME_TYPE, "application/json")
+                put(MediaStore.Downloads.MIME_TYPE, if (name.endsWith(".gpx")) "application/gpx+xml" else "application/json")
             }
             val resolver = context.contentResolver
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)

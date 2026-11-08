@@ -2289,3 +2289,61 @@ summary.session-week-header > span:first-child { flex: 1; text-align: left; }
 .wr-ready small { display: block; font-weight: 400; color: #5c6bc0; }
 #week-reports .wr-open { margin: 0 6px 6px 0; }
 .wr-remind { display: block; margin-top: 6px; font-size: 14px; color: #546e7a; }
+
+/* ─── Today card (today-ui.js) ───────────────────────────────────────────── */
+#home-today { margin-bottom: 10px; }
+.today-card { background: #fff; border-radius: 14px; padding: 14px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); text-align: left; }
+.today-setup h3 { margin: 0 0 6px; }
+.today-setup p { margin: 0 0 10px; color: #444; line-height: 1.4; }
+.today-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 8px; }
+.tw-day { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; border: none; border-radius: 10px; background: #f1f3f8; color: #3f51b5; font: inherit; cursor: pointer; }
+.tw-day small { font-size: 11px; color: #666; font-weight: 600; }
+.tw-day .material-icons { font-size: 20px; }
+.tw-day.today { outline: 2px solid #3f51b5; background: #e8eaf6; }
+.tw-day.picked { outline: 2px dashed #3f51b5; }
+.tw-day.done { background: #1b5e20; color: #fff; }
+.tw-day.done small { color: #dfe; }
+.tw-day.missed { opacity: 0.45; }
+.tw-plus { position: absolute; top: 2px; right: 5px; font-style: normal; font-size: 12px; font-weight: 700; }
+.today-streak { margin: 0 0 8px; font-size: 14px; color: #333; }
+.today-banner { margin: 0 0 8px; padding: 10px; border-radius: 10px; background: #fff8e1; font-size: 14px; line-height: 1.4; }
+.today-banner.welcome { background: #e8f5e9; }
+.today-banner .sp-row { margin-top: 6px; }
+.today-main { border-top: 1px solid #eee; padding-top: 8px; }
+.today-when { color: #666; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+.today-title { margin: 2px 0 4px; font-size: 20px; }
+.today-title.done { color: #1b5e20; }
+.today-main p { margin: 0 0 6px; line-height: 1.4; }
+.today-notes { margin: 0 0 6px; padding-left: 18px; color: #555; font-size: 14px; }
+.today-why { margin: 0 0 8px; font-size: 14px; color: #555; }
+.today-why summary { cursor: pointer; color: #3f51b5; }
+.today-main .up-next-start { width: 100%; background: #1b5e20; color: #fff; }
+.today-just { display: block; margin: 6px 0 0; font-size: 14px; color: #444; }
+.today-also { font-size: 14px; color: #333; background: #f5f5f5; border-radius: 8px; padding: 8px; }
+.today-done-line { color: #1b5e20; font-weight: 600; }
+.today-next { color: #555; font-size: 14px; }
+.today-links { display: flex; justify-content: space-between; margin-top: 6px; }
+/* Just run: time only while running */
+#run-screen.just-run:not([data-state="finished"]) .rs-hero,
+#run-screen.just-run:not([data-state="finished"]) .rs-tiles > div:not(:first-child) { display: none; }
+#run-screen.just-run:not([data-state="finished"]) .rs-tiles > div:first-child span { font-size: 56px; }
+
+/* ─── Plan screen ────────────────────────────────────────────────────────── */
+#plan-screen { position: fixed; inset: 0; z-index: 1200; flex-direction: column; background: #fafafa; overflow: hidden; }
+#plan-screen .rd-body { flex: 1; overflow-y: auto; text-align: left; }
+.plan-goals { display: flex; flex-wrap: wrap; gap: 6px; }
+.plan-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.plan-day { padding: 10px 0; border: 1px solid #c5cae9; border-radius: 8px; background: #fff; color: #3f51b5; font: inherit; font-size: 13px; box-shadow: none; }
+.plan-goal { padding: 8px 12px; border: 1px solid #c5cae9; border-radius: 18px; background: #fff; color: #3f51b5; font: inherit; font-size: 14px; box-shadow: none; }
+.plan-goal.on { background: #3f51b5; color: #fff; border-color: #3f51b5; }
+.plan-day.on { background: #3f51b5; color: #fff; border-color: #3f51b5; }
+.plan-warn { color: #b71c1c; font-size: 14px; }
+.plan-toggle { display: block; margin: 12px 0; }
+.plan-shoes { list-style: none; padding: 0; }
+.plan-shoes li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #eee; }
+.plan-shoes li span { margin-left: auto; color: #666; font-size: 13px; }
+.plan-save { margin: 18px 0 30px; }
+.plan-save .up-next-start { width: 100%; background: #1b5e20; color: #fff; }
+.rd-shoe { display: inline-flex; align-items: center; gap: 6px; margin: 4px 8px 4px 0; font-size: 14px; }
+.wr-week { padding-left: 18px; margin: 0 0 6px; }
+.gym-extras-head { margin: 18px 0 4px; }

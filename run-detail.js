@@ -112,6 +112,8 @@ const RunDetail = (() => {
                         <div class="rd-readout" id="rd-trim-readout"></div>
                         <div class="sp-row"><button class="btn-small" id="rd-trim-save" disabled>Save</button><button class="btn-small" id="rd-trim-cancel">Cancel</button></div>
                     </div>` : ""}
+                    ${hasTrack ? `<button class="btn-small" id="rd-gpx"><span class="material-icons">download</span> Export GPX</button>` : ""}
+                    ${shoePickerHtml(run)}
                     <button class="btn-small btn-danger" id="rd-delete"><span class="material-icons">delete</span> Delete ${noun}</button>
                 </div>
             </div>`;
@@ -130,6 +132,13 @@ const RunDetail = (() => {
         if (run.guided) renderGuided(run, runs);
         setupReplay(run, series);
         if (hasTrack) setupTrim(run, series, runs);
+        const gpx = el.querySelector("#rd-gpx");
+        if (gpx) gpx.addEventListener("click", () => exportGpx(run));
+        const shoe = el.querySelector("#rd-shoe");
+        if (shoe) shoe.addEventListener("change", () => patchRun(run.runId, { shoe: shoe.value || undefined }).then(() => {
+            CloudSync.soon();
+            showToast("Saved.", 1200);
+        }));
     }
 
     // Closing pops history, so anything that touches the run screen waits until
@@ -145,6 +154,33 @@ const RunDetail = (() => {
     function raceRun(run) {
         const spec = { type: "run", runId: run.runId, targetM: Math.floor(run.distance / 10) * 10, label: `Run of ${shortDate(run.startTime)}` };
         closeThen(() => startGhostRaceMode(spec));
+    }
+
+    // ─── Shoes and GPX ───────────────────────────────────────────────────────
+
+    function shoePickerHtml(run) {
+        const list = Today.shoeList().filter(s => !s.retired || s.id === run.shoe);
+        if (!list.length) return "";
+        return `<label class="rd-shoe">👟 Shoes <select id="rd-shoe"><option value="">None</option>${list.map(s =>
+            `<option value="${escapeHtml(s.id)}" ${s.id === run.shoe ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}</select></label>`;
+    }
+
+    // A GPX file in Downloads, for Strava, Garmin Connect or any other app (upload it there)
+    function exportGpx(summary) {
+        getRunById(summary.runId).then(run => {
+            const text = RunAnalysis.toGpx(run);
+            if (!text) throw new Error("this run has no GPS track");
+            const name = `run-${new Date(run.startTime).toISOString().slice(0, 16).replace(/[:T]/g, "-")}.gpx`;
+            if (NativeTracker.available) {
+                return NativeTracker.fileStart(name).then(() => NativeTracker.fileAppend(text)).then(() => NativeTracker.fileFinish())
+                    .then(where => showToast(`Saved to ${where}. Upload it to Strava from strava.com/upload/select.`, 6000));
+            }
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(new Blob([text], { type: "application/gpx+xml" }));
+            a.download = name;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        }).catch(err => alert("Couldn't export that run: " + (err && err.message || err)));
     }
 
     // ─── Fixing a bad run ────────────────────────────────────────────────────
