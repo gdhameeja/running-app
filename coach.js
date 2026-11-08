@@ -222,6 +222,148 @@ class PaceCoach {
     }
 }
 
+// ─── Fun Run games ────────────────────────────────────────────────────────────
+// FunCoach makes the Fun Run react to what you actually do. Segments with a
+// `game` get measured, and it speaks the result. FunCoach.kt is the same for the
+// Android service; keep the two in step (tests.js and FunCoachTest.kt test the same cases).
+//  - burst / finish: your pace over it, against your best this month and your last one
+//  - chase: something starts 50 m behind you, a little quicker than your easy pace,
+//    and the gap is called out until you get away (or it catches you, cheerfully)
+//  - steps: how many steps you took in it, from the step counter
+// `ref` is from your earlier Fun Runs: { easyPace, bestBurst, lastBurst, bestFinish, bestSteps } (s/km, steps).
+// `buzz` collects "start" / "end" / "close" for the phone to vibrate.
+class FunCoach {
+    static CHASE_GAP_M = 50;
+    static CHASE_SPEEDUP = 1.25;
+    static CHASE_SAY_EVERY_MS = 10000;
+    static DEFAULT_EASY_PACE = 400;
+    static CHASERS = { zombie: "The zombie", dog: "The dog", bus: "The bus" };
+
+    constructor(segments, ref = {}) {
+        this.segments = segments;
+        this.ref = Object.assign({}, ref);
+        this.seg = -1;
+        this.start = null; // { t, dist, steps }
+        this.chase = null; // { speed, saidAt, close, caught }
+        this.results = { bursts: [], finish: null, escaped: 0, caught: 0, steps: [] };
+        this.buzz = [];
+    }
+
+    static isFun(segments) {
+        return (segments || []).some(s => s.game);
+    }
+
+    get active() { return this.seg >= 0; }
+
+    // Segment `index` just started. Returns what to say after its own announcement;
+    // `ended` holds what to say about the one before, said first.
+    startSegment(index, t, dist, steps = null) {
+        const ended = this.end(t, dist, steps);
+        const s = this.segments[index];
+        this.seg = s ? index : -1;
+        this.start = { t, dist, steps };
+        this.chase = null;
+        const said = [];
+        if (s && s.game) {
+            if (s.game !== "steps") this.buzz.push("start");
+            if (s.game === "chase") {
+                const easy = 1000 / (this.ref.easyPace || FunCoach.DEFAULT_EASY_PACE);
+                this.chase = { speed: easy * FunCoach.CHASE_SPEEDUP, saidAt: t, close: false, caught: false };
+            }
+        }
+        return { ended, said };
+    }
+
+    gap(t, dist) {
+        if (!this.chase) return null;
+        const chaser = this.start.dist - FunCoach.CHASE_GAP_M + this.chase.speed * (t - this.start.t) / 1000;
+        return dist - chaser;
+    }
+
+    tick(t, dist) {
+        const s = this.segments[this.seg];
+        if (!s || !this.chase || this.chase.caught) return [];
+        const who = FunCoach.CHASERS[s.chaser] || "It";
+        const gap = this.gap(t, dist);
+        if (gap <= 0) {
+            this.chase.caught = true;
+            this.buzz.push("end");
+            return [`${who} caught you! Shake it off. You'll get away next time.`];
+        }
+        if (gap < 15 && !this.chase.close) {
+            this.chase.close = true;
+            this.chase.saidAt = t;
+            this.buzz.push("close");
+            return [`${who} is right behind you! Go, go!`];
+        }
+        if (t - this.chase.saidAt >= FunCoach.CHASE_SAY_EVERY_MS) {
+            this.chase.saidAt = t;
+            if (gap >= 15) this.chase.close = false;
+            return [`${Math.round(gap / 5) * 5} metres.`];
+        }
+        return [];
+    }
+
+    // The run ended: how the last part went
+    finish(t, dist, steps = null) {
+        const said = this.end(t, dist, steps);
+        this.seg = -1;
+        return said;
+    }
+
+    end(t, dist, steps) {
+        const s = this.segments[this.seg];
+        if (!s || !s.game || !this.start) return [];
+        const dt = t - this.start.t, dd = dist - this.start.dist;
+        if (s.game === "steps") {
+            if (steps == null || this.start.steps == null || dt < 5000) return [];
+            const n = steps - this.start.steps;
+            const best = this.ref.bestSteps;
+            this.results.steps.push([this.seg, n]);
+            const perMin = Math.round(n * 60000 / dt);
+            const line = best != null && n > best ? ` Your most yet!` : "";
+            if (best == null || n > best) this.ref.bestSteps = n;
+            return [`${n} steps. That's ${perMin} a minute!${line}`];
+        }
+        if (s.game === "chase") {
+            if (this.chase && this.chase.caught) { this.results.caught++; return []; }
+            this.buzz.push("end");
+            this.results.escaped++;
+            return ["You got away! Back to easy."];
+        }
+        this.buzz.push("end");
+        // burst or finish: too short a stretch for GPS to say anything useful
+        if (dd < 20 || dt < 5000) return [];
+        const pace = dt / dd; // s/km
+        const p = spokenPace(pace);
+        if (s.game === "finish") {
+            this.results.finish = Math.round(pace * 10) / 10;
+            const best = this.ref.bestFinish;
+            if (best == null || pace < best) { this.ref.bestFinish = pace; return [`Photo finish: ${p}.${best == null ? "" : " Your best finish yet!"}`]; }
+            return [`Photo finish: ${p}.`];
+        }
+        this.results.bursts.push([this.seg, Math.round(pace * 10) / 10]);
+        const best = this.ref.bestBurst, last = this.ref.lastBurst;
+        this.ref.lastBurst = pace;
+        if (best != null && pace < best) { this.ref.bestBurst = pace; return [`${p}. Your quickest burst this month!`]; }
+        if (best == null) this.ref.bestBurst = pace;
+        if (last != null && last - pace >= 1) return [`${p}. ${Math.round(last - pace)} seconds quicker than the last one!`];
+        return [`${p}. Nice.`];
+    }
+
+    // For the run screen: the chase gap, if one's on
+    state(t, dist) {
+        const s = this.segments[this.seg];
+        if (!s || !this.chase) return null;
+        return { chaser: FunCoach.CHASERS[s.chaser] || "It", gap: Math.round(this.gap(t, dist)), caught: this.chase.caught };
+    }
+
+    // For carrying on after the app was killed
+    snapshot() {
+        return { seg: this.seg, start: this.start, chase: this.chase, results: this.results, ref: this.ref };
+    }
+}
+
 const TuneInPlanner = (() => {
     const NEED_RUNS = 5;
     const POOL = 10;
@@ -441,4 +583,4 @@ const TuneInPlanner = (() => {
     return { plan, result, usualSpeed, maxHeartRate, NEED_RUNS, TEMPLATES };
 })();
 
-if (typeof module !== "undefined") module.exports = { PaceCoach, TuneInPlanner, EFFORT_LABELS, spokenPace, coachPace };
+if (typeof module !== "undefined") module.exports = { PaceCoach, FunCoach, TuneInPlanner, EFFORT_LABELS, spokenPace, coachPace };

@@ -47,6 +47,8 @@ let pauseData = [];
 // Everything said during the run, [moving ms, text], and how each Tune-In part went
 let coachLog = [];
 let coachResults = null;
+// How the Fun Run games went (FunCoach), saved with the run
+let funResults = null;
 // Set just before Start to make this a "walk": same tracking, kept out of your running numbers
 let nextActivity = null;
 // What the one in progress is: null for a run
@@ -217,6 +219,7 @@ function initTabs() {
             if (tab.dataset.tab === "courses") {
                 refreshActiveBanner();
                 renderTuneInCard();
+                Today.render();
             }
             if (tab.dataset.tab === "history") {
                 renderHistory();
@@ -226,7 +229,6 @@ function initTabs() {
                 renderHomeRecent();
                 renderFeelPicker();
                 WeekReport.renderCards();
-                Today.render();
             }
             updateHomeGpsWatch();
         });
@@ -276,6 +278,7 @@ document.getElementById("start").addEventListener("click", () => {
     pauseData = [];
     coachLog = [];
     coachResults = null;
+    funResults = null;
     lastGpsMotion = null;
     currentSpeed = null;
     lastTimeSeriesDistance = 0;
@@ -485,6 +488,10 @@ function endRun(endTime) {
 
 // The last Tune-In part counts too, even if you stopped early (web runs; the service does its own)
 function finishCoach(movingMs) {
+    if (guidedRun && guidedRun.funCoach) {
+        guidedRun.funCoach.finish(movingMs, totalDistance, webSteps()).forEach(speakText);
+        funResults = guidedRun.funCoach.results;
+    }
     if (!guidedRun || !guidedRun.coach) return;
     guidedRun.coach.finish(movingMs, totalDistance);
     coachResults = { eases: guidedRun.coach.eases, parts: guidedRun.coach.results };
@@ -495,7 +502,20 @@ function extraRunData() {
     const out = { raw: rawData, pauses: pauseData, coachLog };
     if (stepData.length) out.steps = stepData;
     if (coachResults) out.coachResults = coachResults;
+    if (funResults) out.funResults = funResults;
     return out;
+}
+
+// Web runs have no step counter
+function webSteps() {
+    return stepData.length ? stepData[stepData.length - 1][1] : null;
+}
+
+// Fun Run cues you can feel (where the browser can vibrate)
+function funBuzz() {
+    if (!guidedRun || !guidedRun.funCoach) return;
+    const patterns = { start: [150, 100, 150], close: [80, 60, 80, 60, 80], end: [400] };
+    guidedRun.funCoach.buzz.splice(0).forEach(k => { if (navigator.vibrate) navigator.vibrate(patterns[k] || [400]); });
 }
 
 // ─── Utility ───────────────────────────────────────────────────────────────────
@@ -1418,6 +1438,7 @@ function openCourseDetail(courseId, level = "beginner") {
     document.getElementById("course-grid").style.display = "none";
     document.getElementById("active-course-banner").style.display = "none";
     document.getElementById("tunein-card").style.display = "none";
+    document.getElementById("home-today").style.display = "none";
     document.getElementById("course-detail").style.display = "block";
 
     document.getElementById("cd-icon").textContent = course.icon;
@@ -1494,6 +1515,16 @@ function renderSessionList(course, levelKey, progress) {
     const level = course.levels[levelKey];
     const container = document.getElementById("session-list");
     container.innerHTML = "";
+    // Fun Run: one you can't see coming, outside the course's own order
+    if (course.id === "fun-run") {
+        const box = document.createElement("div");
+        box.className = "up-next-card fun-surprise";
+        box.innerHTML = `<div class="up-next-title">🎲 Surprise me</div>
+            <div class="up-next-meta">A random Fun Run at this level. You won't know what's coming until it happens. It doesn't count as a session of the course.</div>
+            <button class="up-next-start" id="fun-surprise"><span class="material-icons">casino</span> Start a mystery run</button>`;
+        container.appendChild(box);
+        box.querySelector("#fun-surprise").addEventListener("click", () => startGuidedSession(mysteryFunRun(levelKey), "fun-mystery", null, null));
+    }
 
     const enrolled = progress && progress.level === levelKey;
     const completedIndices = enrolled
@@ -1602,6 +1633,7 @@ function closeCourseDetail() {
     document.getElementById("course-grid").style.display = "grid";
     refreshActiveBanner();
     document.getElementById("tunein-card").style.display = "";
+    document.getElementById("home-today").style.display = "";
     renderTuneInCard();
 }
 
@@ -1746,6 +1778,24 @@ function startGuidedRun(courseId, levelKey, sessionIndex) {
     startGuidedSession(course.levels[levelKey].sessions[sessionIndex], courseId, levelKey, sessionIndex);
 }
 
+// A Fun Run's games compare against your earlier Fun Runs: { easyPace, bestBurst, lastBurst, bestFinish, bestSteps }
+function funRef(runs, now = Date.now()) {
+    const fun = runs.filter(r => r.endTime && r.funResults).sort((a, b) => a.startTime - b.startTime);
+    const month = fun.filter(r => r.startTime >= now - 30 * 86400000);
+    const bursts = (list) => list.flatMap(r => (r.funResults.bursts || []).map(b => b[1]));
+    const last = fun.length ? bursts([fun[fun.length - 1]]) : [];
+    const finishes = fun.map(r => r.funResults.finish).filter(x => x > 0);
+    const steps = fun.flatMap(r => (r.funResults.steps || []).map(x => x[1]));
+    const easy = runs.filter(r => r.endTime && !r.activity && !r.guided && r.distance >= 1500 && r.pace > 0)
+        .sort((a, b) => b.startTime - a.startTime).slice(0, 10).map(r => r.pace).sort((a, b) => a - b);
+    const min = (xs) => xs.length ? Math.min(...xs) : null;
+    return {
+        easyPace: easy.length ? easy[easy.length >> 1] : null,
+        bestBurst: min(bursts(month)), lastBurst: last.length ? last[last.length - 1] : null,
+        bestFinish: min(finishes), bestSteps: steps.length ? Math.max(...steps) : null,
+    };
+}
+
 // A course session, or a Tune-In run (courseId "tune-in", planned on the spot, no course to enroll in)
 function startGuidedSession(sess, courseId, levelKey, sessionIndex) {
     if (document.getElementById("start").disabled) {
@@ -1753,12 +1803,24 @@ function startGuidedSession(sess, courseId, levelKey, sessionIndex) {
         return;
     }
     if (workoutInTheWay()) return;
+    // Fun Runs: suited to today's weather and hour, with your earlier games to beat
+    if (FunCoach.isFun(sess.segments) && !sess.fun) {
+        const weather = Promise.race([Enrich.todayWeather(), new Promise(r => setTimeout(() => r(null), 1500))]);
+        Promise.all([weather, getAllRuns()]).then(([w, runs]) => {
+            const adapted = adaptFunRun(sess, w, new Date().getHours());
+            if (adapted.notes.length) showToast(adapted.notes.join(" · "), 4000);
+            startGuidedSession(Object.assign(adapted.session, { fun: funRef(runs) }), courseId, levelKey, sessionIndex);
+        }).catch(() => startGuidedSession(Object.assign({}, sess, { fun: {} }), courseId, levelKey, sessionIndex));
+        return;
+    }
 
     guidedRun = {
         courseId, level: levelKey, sessionIndex, session: sess,
         segments: sess.segments,
         // Tune-In runs: the Android service runs its own coach and reports its state
         coach: PaceCoach.isCoached(sess.segments) && !NativeTracker.available ? newCoach(sess.segments) : null,
+        // Fun Runs: the games (on Android the service plays them)
+        funCoach: FunCoach.isFun(sess.segments) && !NativeTracker.available ? new FunCoach(sess.segments.map(s => ({ game: s.game, chaser: s.chaser, durationMs: Math.round(s.duration * 60) * 1000 })), sess.fun || {}) : null,
         coachState: null,
         currentSegmentIndex: -1,
         segmentStartTime: null,
@@ -1767,6 +1829,7 @@ function startGuidedSession(sess, courseId, levelKey, sessionIndex) {
         announcedWarnings: {}
     };
 
+    funResults = null;
     // Auto-enroll if not on this course. A session from another level than the
     // one you're enrolled at is a one-off: a second enrolment would never get ticked.
     getCourseProgress(courseId).then(progress => {
@@ -1802,7 +1865,7 @@ function showGuidedPanel(sess) {
     document.getElementById("gr-segment-type").textContent = "GET READY";
     document.getElementById("gr-segment-intensity").textContent = "";
     document.getElementById("gr-time-remaining").textContent = "";
-    document.getElementById("gr-next-segment").textContent = `First: ${segmentLabel(sess.segments[0])}`;
+    document.getElementById("gr-next-segment").textContent = sess.mystery ? "First: a warm-up. After that, who knows?" : `First: ${segmentLabel(sess.segments[0])}`;
     guidedRun.coachState = null;
     renderCoach();
     document.getElementById("gr-segment-count").textContent = `${sess.segments.length} segments total`;
@@ -1826,10 +1889,14 @@ function startSegment(index, scheduledStart = Date.now()) {
 
     // The pace coach announces its own segments, with their pace
     const coached = guidedRun.coach ? guidedRun.coach.startSegment(index, runElapsedMs(), totalDistance) : [];
+    const game = guidedRun.funCoach ? guidedRun.funCoach.startSegment(index, runElapsedMs(), totalDistance, webSteps()) : { ended: [], said: [] };
+    game.ended.forEach(speakText);
     // When catching up after throttled timers, skip segments that already ended
     if (Date.now() < scheduledStart + durationSec * 1000) {
         if (coached.length) coachSay(coached); else announceSegment(seg, durationSec);
+        game.said.forEach(speakText);
     }
+    funBuzz();
     updateGuidedRunUI();
     // updateGuidedRunUI may already have advanced past this segment
     if (!guidedRun || guidedRun.currentSegmentIndex !== index || guidedRun.completing) return;
@@ -1861,6 +1928,7 @@ function updateGuidedRunUI() {
     const remaining = Math.max(0, durationSec - elapsed);
 
     if (guidedRun.coach) coachSay(guidedRun.coach.tick(runElapsedMs(), totalDistance));
+    if (guidedRun.funCoach) { guidedRun.funCoach.tick(runElapsedMs(), totalDistance).forEach(speakText); funBuzz(); }
     renderGuidedPanel(remaining);
 
     // Voice countdowns
@@ -1901,6 +1969,10 @@ function renderGuidedPanel(remaining) {
     // Games and strides show what to do; paced segments show it in the coach box
     const intensity = document.getElementById("gr-segment-intensity");
     intensity.textContent = (seg.type === "play" || seg.type === "stride") && seg.say ? seg.say : seg.intensity;
+    const chase = guidedRun.funCoach ? guidedRun.funCoach.state(runElapsedMs(), totalDistance) : guidedRun.chase;
+    if (seg.game === "chase" && chase) {
+        intensity.textContent = chase.caught ? `${chase.chaser} caught you. Next time!` : `${chase.chaser} is ${Math.max(0, chase.gap)} m behind you`;
+    }
     intensity.style.display = seg.pace != null ? "none" : "";
     renderCoach();
 
@@ -1919,8 +1991,8 @@ function renderGuidedPanel(remaining) {
         const next = guidedRun.segments[nextIdx];
         const nextDur = Math.round(next.duration * 60);
         const nextDurStr = nextDur >= 60 ? `${Math.floor(nextDur / 60)}m` : `${nextDur}s`;
-        document.getElementById("gr-next-segment").textContent =
-            `Next: ${segmentLabel(next)} — ${nextDurStr}`;
+        document.getElementById("gr-next-segment").textContent = guidedRun.session && guidedRun.session.mystery
+            ? "Next: ???" : `Next: ${segmentLabel(next)} — ${nextDurStr}`;
     } else {
         document.getElementById("gr-next-segment").textContent = "Final segment!";
     }

@@ -218,6 +218,13 @@ function renderVO2max(runs) {
     if (vo2) {
         el.textContent = vo2;
         document.getElementById("vo2max-section").style.display = "block";
+        // Fitness age, once you've given your birth year and sex in a weekly report
+        const note = document.querySelector("#vo2max-section .vo2max-note");
+        WeekReport.profile().then(me => {
+            const f = WeekReport.fitness(runs, Date.now(), me);
+            const base = "From your predicted 5K: your best recent run of 1.5 km or more.";
+            note.textContent = f.age ? `${base} Fitness age: about ${f.age} (you're ${f.realAge}).` : `${base} Add your birth year in a weekly report to see your fitness age.`;
+        });
     } else {
         document.getElementById("vo2max-section").style.display = "none";
     }

@@ -18,6 +18,9 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.VibratorManager
+import android.os.Vibrator
+import android.os.VibrationEffect
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -296,7 +299,28 @@ class RunTrackerService : Service(), LocationListener {
 
     // ─── Output: voice, web layer, notification, disk ────────────────────────
 
-    private fun speakAll(phrases: List<String>) = phrases.forEach(speaker::speak)
+    private fun speakAll(phrases: List<String>) {
+        phrases.forEach(speaker::speak)
+        engine?.funCoach?.takeBuzz()?.forEach(::vibrate)
+    }
+
+    /** Fun Run cues you can feel with music on: start, end, and the chaser closing in. */
+    private fun vibrate(kind: String) {
+        val pattern = when (kind) {
+            "start" -> longArrayOf(0, 150, 100, 150)
+            "close" -> longArrayOf(0, 80, 60, 80, 60, 80)
+            else -> longArrayOf(0, 400)
+        }
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                getSystemService(VibratorManager::class.java).defaultVibrator
+            } else {
+                @Suppress("DEPRECATION") getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
+            else @Suppress("DEPRECATION") vibrator.vibrate(pattern, -1)
+        } catch (e: Exception) { /* no vibrator: the voice says it anyway */ }
+    }
 
     private fun publish(now: Long) {
         val e = engine ?: return

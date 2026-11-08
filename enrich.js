@@ -220,10 +220,10 @@ const Enrich = (() => {
         if (today && Date.now() - today.at < 30 * 60000) return Promise.resolve(today.data);
         return here().then(pos => {
             if (!pos) return null;
-            return getJson(`${FORECAST_URL}?latitude=${pos[0].toFixed(4)}&longitude=${pos[1].toFixed(4)}&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m`)
+            return getJson(`${FORECAST_URL}?latitude=${pos[0].toFixed(4)}&longitude=${pos[1].toFixed(4)}&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation`)
                 .then(d => {
                     const c = d.current;
-                    const data = c ? { tempC: c.temperature_2m, feelsC: c.apparent_temperature, humidity: c.relative_humidity_2m, windKmh: c.wind_speed_10m } : null;
+                    const data = c ? { tempC: c.temperature_2m, feelsC: c.apparent_temperature, humidity: c.relative_humidity_2m, windKmh: c.wind_speed_10m, precipMm: c.precipitation } : null;
                     today = { at: Date.now(), data };
                     return data;
                 });

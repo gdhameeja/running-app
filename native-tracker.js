@@ -83,7 +83,10 @@ function startNativeRun() {
         guided: guidedRun ? guidedRun.segments.map(s => ({
             type: s.type, durationSec: Math.round(s.duration * 60), intensity: s.intensity,
             label: s.label || null, say: s.say || null, role: s.role || null, pace: s.pace || null,
+            game: s.game || null, chaser: s.chaser || null,
         })) : null,
+        // Fun Runs: your earlier games, for the service's FunCoach to compare against
+        fun: guidedRun && guidedRun.session.fun ? guidedRun.session.fun : null,
         meta: JSON.stringify(meta),
     });
 }
@@ -224,6 +227,7 @@ function applyNativeSummary(s) {
     }
 
     if (guidedRun && s.guided) {
+        guidedRun.chase = s.chase || null;
         guidedRun.coachState = s.coach || null;
         guidedRun.currentSegmentIndex = s.guided.index;
         if (s.guided.index >= 0 && s.guided.index < guidedRun.segments.length) {
@@ -268,6 +272,7 @@ function applyNativeSnapshot(run) {
     pauseData = run.pauses || [];
     coachLog = run.coachLog || [];
     coachResults = run.coachResults || null;
+    funResults = run.funResults || null;
     const segs = run.pathSegments && run.pathSegments.length ? run.pathSegments : [[]];
     pathSegments = segs.slice(0, -1);
     currentSegment = segs[segs.length - 1];
@@ -359,5 +364,6 @@ function saveNativeSnapshot(run) {
         pauses: run.pauses || [],
         coachLog: run.coachLog || [],
         coachResults: run.coachResults || undefined,
+        funResults: run.funResults || undefined,
     })));
 }

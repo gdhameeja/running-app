@@ -420,6 +420,30 @@ const RunAnalysis = (() => {
         return Math.round(cost / share * 10) / 10;
     }
 
+    // Fitness age: the age at which your VO2max would be the median for your sex in
+    // the FRIEND registry's 2022 treadmill standards (Kaminsky et al., Mayo Clin Proc
+    // 2022; 22,379 lab tests, US adults 20-89), by decade, read off between the
+    // middles of each decade. { age, norm, vo2 }, or null. Rough: VO2max from your
+    // running isn't a lab test, and if you rarely run hard it reads low.
+    const FITNESS_NORM = {
+        male: [45.4, 38.6, 34.8, 29.4, 24.4, 20.6, 17.7],
+        female: [35.6, 28.3, 25.9, 23.1, 19.4, 17.1, 15.1],
+    };
+    const NORM_AGES = [25, 35, 45, 55, 65, 75, 85];
+    function fitnessAge(vo2, age, sex) {
+        const n = FITNESS_NORM[sex];
+        if (!n || !(vo2 > 0) || !(age > 0)) return null;
+        // The median at an age, and the age with a given median (both straight between decades)
+        const lerp = (xs, ys, x) => {
+            let i = 1;
+            while (i < xs.length - 1 && x > xs[i]) i++;
+            return ys[i - 1] + (ys[i] - ys[i - 1]) * (x - xs[i - 1]) / (xs[i] - xs[i - 1]);
+        };
+        const norm = lerp(NORM_AGES, n, Math.min(89, Math.max(20, age)));
+        const at = lerp([...n].reverse(), [...NORM_AGES].reverse(), vo2);
+        return { age: Math.round(Math.max(20, Math.min(89, at))), below20: at < 20, above90: at > 89, norm: Math.round(norm * 10) / 10, vo2 };
+    }
+
     // What a segment asks for, as a pace range in multiples of 5K pace.
     function segmentTarget(seg) {
         // Tune-In segments carry their own pace; easy parts aren't judged
@@ -684,7 +708,7 @@ ${points.join("\n")}
         sparseSeries, completeSeries, bestEffort, runBestEffort, sliceSeries, kmSplits, findStops, paceSegments, quantile, metres,
         routeSignature, coverage, sameRoute, groupRoutes, rankRoute,
         ghostCue, spokenMetres, CUE_EVERY_M,
-        MIN_PACE, toGpx, fiveKPace, vo2max, segmentTarget, guidedReport, parseDuration, formatDistance, trimRun,
+        MIN_PACE, toGpx, fiveKPace, vo2max, fitnessAge, segmentTarget, guidedReport, parseDuration, formatDistance, trimRun,
         minettiFactor, flatMetres, hillFactor, heatSlowdown, wallOffset, hrBetween, cadenceBetween,
     };
 })();

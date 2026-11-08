@@ -68,6 +68,10 @@ data class GuidedSegment(
     val say: String? = null,
     val role: String? = null,
     val pace: Double? = null,
+    /** Fun Run games, measured by [FunCoach]: "burst", "finish", "chase", "steps". */
+    val game: String? = null,
+    /** What's chasing you in a "chase": "zombie", "dog", "bus". */
+    val chaser: String? = null,
 )
 
 /** The ghost to race: finish line in metres and its run (moving time vs distance). */
@@ -80,6 +84,8 @@ data class RunConfig(
     val guided: List<GuidedSegment>? = null,
     /** Opaque JSON from the web layer (ghost/guided context), handed back on recovery. */
     val meta: String? = null,
+    /** Fun Runs: your earlier bursts and easy pace, for the games to compare against. */
+    val funRef: FunRef? = null,
 )
 
 /**
@@ -382,6 +388,11 @@ class RunEngine(val config: RunConfig, now: Long) {
     /** Tune-In runs: coaches each segment's target pace (null for other runs). */
     val coach: PaceCoach? = if (PaceCoach.isCoached(config.guided)) PaceCoach(config.guided!!) else null
 
+    /** Fun Runs: measures the games (null for other runs). */
+    val funCoach: FunCoach? = if (FunCoach.isFun(config.guided)) FunCoach(config.guided!!, config.funRef ?: FunRef()) else null
+
+    private val stepsOrNull get() = if (stepBase != null) stepCount else null
+
     // Ghost race result: null while racing, true/false once you cross the target.
     var ghostWon: Boolean? = null
         private set
@@ -475,6 +486,7 @@ class RunEngine(val config: RunConfig, now: Long) {
         }
         // A run stopped early still records how its last part went
         coach?.finish(now - startTime, totalDistance)
+        funCoach?.finish(now - startTime, totalDistance, stepsOrNull)
         endTime = now
         status = Status.FINISHED
     }
@@ -676,6 +688,7 @@ class RunEngine(val config: RunConfig, now: Long) {
             guidedIndex = segments.size
             guidedCompleted = true
             coach?.finish(elapsed, totalDistance)
+            funCoach?.finish(elapsed, totalDistance, stepsOrNull)?.let { speech += it }
             speech += "Workout complete! Great job!"
             finish(now)
             return speech
@@ -686,11 +699,15 @@ class RunEngine(val config: RunConfig, now: Long) {
             if (index >= 0) {
                 // The pace coach announces its own segments, with their pace
                 val coached = coach?.startSegment(index, elapsed, totalDistance).orEmpty()
+                val game = funCoach?.startSegment(index, elapsed, totalDistance, stepsOrNull)
+                game?.first?.let { speech += it }
                 speech += coached.ifEmpty { listOf(segmentAnnouncement(segments[index])) }
+                game?.second?.let { speech += it }
             }
         }
         if (index < 0) return speech
         coach?.let { speech += it.tick(elapsed, totalDistance, cadence(now)) }
+        funCoach?.let { speech += it.tick(elapsed, totalDistance) }
 
         val seg = segments[index]
         val remaining = (guidedSegmentEnds[index + 1] - elapsed) / 1000.0

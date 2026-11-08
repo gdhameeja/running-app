@@ -200,11 +200,22 @@ ghosts, the pace chart, weekly volume) skips records with an `activity`.
   are short extras saved with `light: true`: they don't move the A/B/C turn or count
   as a strength day.
 
-## The plan (Today card)
+## Fun Run games
+
+Fun Run segments can carry a `game` ("burst", "finish", "chase", "steps", with a
+`chaser` for chases). `FunCoach` (coach.js, and FunCoach.kt in the service) times
+bursts and the photo finish against your earlier Fun Runs (`fun` in the run config,
+from `funRef`), runs the chase gap, counts quick-feet steps, and queues vibrations.
+What it measured is saved as `funResults` on the run. Every week's third session is an
+Agent Runner episode; `adaptFunRun` changes a session for heat, rain and dark, and
+"Surprise me" (`mysteryFunRun`, course id `fun-mystery`) hides what's next.
+
+## Your plan (a course)
 
 `training-plan.js` works out what each day is for from the `training-plan` record
-(run days, strength days, goal, optional race date); `today-ui.js` shows it at the top
-of the Run tab with the week as a strip. Easy runs by effort, one harder session a week
+(run days, strength days, goal, optional race date); `today-ui.js` shows it as
+"Your plan" at the top of the Courses tab, with the week as a strip. The Run tab
+stays about tracking. Easy runs by effort, one harder session a week
 (two at four or more runs), and a long run capped at 10% past your longest in the last
 30 days; four-week blocks with an easier fourth week; a two-week taper before a race.
 Tired, unwell ("Not feeling 100%"), fatigue in the weekly report, or back from a break

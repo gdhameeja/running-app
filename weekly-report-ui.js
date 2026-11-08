@@ -36,16 +36,65 @@ const WeekReport = (() => {
 
     // The newest week is always recalculated; `start` picks an older one to read back
     function load(start, fresh = false) {
-        return Promise.all([allRecords(), getAllRuns()]).then(([records, runs]) => {
+        return Promise.all([allRecords(), getAllRuns(), profile()]).then(([records, runs, me]) => {
             const mine = records.find(r => r.progressId === idFor(start));
             record = mine || { progressId: idFor(start), weekStart: start };
             if (!fresh && start !== latestWeek() && record.report) return record;
             return Enrich.dailyHealth().then(health => {
                 const paused = new Set(records.filter(r => r.paused).map(r => r.weekStart));
-                record.report = WeeklyReport.build({ sessions: runs, start, health, paused });
+                record.report = WeeklyReport.build({ sessions: runs, start, health, paused, planned: Today.plannedFor(start) });
+                record.report.fitness = fitness(runs, record.report.weekEnd, me);
                 return record;
             });
         });
+    }
+
+    // ─── Fitness age ─────────────────────────────────────────────────────────
+    // Your running-based VO2max against people of your age and sex (FRIEND registry),
+    // with where it was four weeks before. Needs your birth year and sex.
+
+    const PROFILE_ID = "profile";
+
+    function profile() {
+        return new Promise((resolve) => {
+            const req = db.transaction(["courseProgress"]).objectStore("courseProgress").get(PROFILE_ID);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => resolve(null);
+        });
+    }
+
+    function fitness(runs, end, me) {
+        const vo2 = RunAnalysis.vo2max(runs, end);
+        if (!vo2) return { none: true };
+        if (!me || !me.birthYear || !me.sex) return { vo2, needProfile: true };
+        const age = new Date(end).getFullYear() - me.birthYear;
+        const now = RunAnalysis.fitnessAge(vo2, age, me.sex);
+        const was = RunAnalysis.vo2max(runs, WeeklyReport.addWeeks(end, -4));
+        return Object.assign({ vo2, realAge: age, sex: me.sex }, now, { was: was ? RunAnalysis.fitnessAge(was, age, me.sex).age : null });
+    }
+
+    function askProfile() {
+        const year = Number(prompt("Your birth year? (For your fitness age; it stays in your own data.)", ""));
+        if (!(year > 1920 && year < new Date().getFullYear() - 10)) return Promise.resolve(false);
+        const sex = confirm("Fitness age compares you with people of your sex. Male? OK for male, Cancel for female.") ? "male" : "female";
+        return saveCourseProgress({ progressId: PROFILE_ID, birthYear: year, sex }).then(() => { CloudSync.soon(); return true; });
+    }
+
+    function fitnessHtml(f) {
+        if (!f || f.none) return "";
+        if (f.needProfile) {
+            return `<div class="wr-card"><h3>Fitness age</h3><p>Your running puts your VO2max at about <b>${Math.round(f.vo2)}</b>. Add your birth year and sex to see what age that's typical for.</p>
+                <button class="btn-small" id="wr-profile">Add them</button></div>`;
+        }
+        const diff = f.realAge - f.age;
+        const ageText = f.below20 ? "under 20" : f.above90 ? "over 89" : `about ${f.age}`;
+        const vs = Math.abs(diff) <= 2 ? "about your own age" : diff > 0 ? `${diff} years younger than you are` : `${-diff} years older than you are`;
+        const trend = f.was != null && f.was !== f.age ? ` Four weeks ago it was ${f.was}.` : "";
+        return `<div class="wr-card"><h3>Fitness age</h3>
+            <p class="wr-fitness"><b>${ageText}</b> <small>you're ${f.realAge}</small></p>
+            <p>Your heart and lungs are as fit as a typical ${f.sex === "male" ? "man" : "woman"} of ${ageText.replace("about ", "")}: ${vs}.${trend}</p>
+            <details class="wr-why"><summary>How is this worked out?</summary><p>Your VO2max (about ${Math.round(f.vo2)} ml/kg/min) is estimated from your fastest recent run, then compared with 22,379 lab treadmill tests in the FRIEND registry, where the middle value at your age is ${f.norm}. It's rough, give or take several years: a run isn't a lab test, and if you rarely run hard it reads low, so a ghost race or a Tune-In run gives it more to go on. What it tracks matters, though: in a review of 33 studies, each step up in fitness (1 MET, about 3.5 VO2max) went with about 13% lower risk of dying early.</p></details>
+        </div>`;
     }
 
     // ─── The screen ──────────────────────────────────────────────────────────
@@ -83,7 +132,7 @@ const WeekReport = (() => {
         const pause = `<button class="link-btn" id="wr-pause">${record.paused ? "Count this week after all" : "Ill or away? Leave this week out"}</button>`;
         const foot = `<p class="wr-based">${escapeHtml(basedOnHtml(r))}</p>${pause}`;
         const note = `<label class="wr-note">${escapeHtml(question)}<textarea id="wr-note" rows="2">${escapeHtml(record.note || "")}</textarea></label>`;
-        if (r.light) return `<div class="wr-card">${asked}<p>${escapeHtml(r.line)}</p></div>${note}${foot}`;
+        if (r.light) return `<div class="wr-card">${asked}<p>${escapeHtml(r.line)}</p></div>${toWorkOnHtml(r)}${fitnessHtml(r.fitness)}${note}${foot}`;
         const o = r.observation;
         return `${asked}<div class="wr-card"><p class="wr-line">${escapeHtml(r.line)}</p>
                 ${r.wentWell ? `<p class="wr-good"><span class="material-icons">star</span>${escapeHtml(r.wentWell)}</p>` : ""}
@@ -97,10 +146,20 @@ const WeekReport = (() => {
                 ${o && o.next ? `<p>${escapeHtml(o.next)}</p>` : ""}
                 ${r.longest && !(o && o.rule === "long-run") ? `<p>Your longest run lately is ${r.longest.km.toFixed(1)} km, so about ${r.longest.top.toFixed(1)} km is the top of your usual range.</p>` : ""}
             </div>` : ""}
+            ${toWorkOnHtml(r)}
+            ${fitnessHtml(r.fitness)}
             ${r.review ? `<div class="wr-card"><h3>Four weeks against the four before</h3>
                 <table class="wr-table wr-review">${r.review.map(x => `<tr><td>${escapeHtml(x.label)}</td><td>${escapeHtml(x.text)}</td></tr>`).join("")}</table>
                 <p class="wr-minor">One week can't show a change in fitness, so it's only judged here. Pace allows for hills and heat.</p></div>` : ""}
             ${planHtml(r)}${note}${foot}`;
+    }
+
+    // What fell short, beside what went well: a balanced week
+    function toWorkOnHtml(r) {
+        if (!r.toWorkOn) return "";
+        if (!r.toWorkOn.length) return r.light ? "" : `<div class="wr-card"><h3>To work on</h3><p>Nothing stood out this week. Keep doing what you're doing.</p></div>`;
+        return `<div class="wr-card wr-work"><h3>To work on</h3>${r.toWorkOn.map(x =>
+            `<p class="wr-bad"><span class="material-icons">trending_flat</span><span><b>${escapeHtml(x.text)}</b><br>${escapeHtml(x.next)}</span></p>`).join("")}</div>`;
     }
 
     // The "plan this week" step: the week ahead from your plan, and a way to move days
@@ -130,6 +189,7 @@ const WeekReport = (() => {
         const el = screen();
         const on = (id, ev, fn) => { const b = el.querySelector("#" + id); if (b) b.addEventListener(ev, fn); };
         on("wr-back", "click", () => close(false));
+        on("wr-profile", "click", () => askProfile().then(ok => ok && load(record.weekStart, true).then(store).then(render)));
         on("wr-plan", "click", (e) => {
             const week = e.currentTarget.dataset.week;
             close(false);
@@ -232,5 +292,5 @@ const WeekReport = (() => {
         renderCards();
     }
 
-    return { init, open, renderCards, renderList, latestWeek, nextMonday };
+    return { init, open, renderCards, renderList, latestWeek, nextMonday, profile, fitness };
 })();

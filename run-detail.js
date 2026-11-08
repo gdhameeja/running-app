@@ -456,10 +456,27 @@ const RunDetail = (() => {
     }
 
     // Fun Run: no verdicts, just what you did and how quick the strides were
-    function funSummaryHtml(rep) {
+    function funSummaryHtml(rep, run) {
         const games = rep.rows.filter(r => r.seg.type === "play" || (r.seg.type === "run" && r.seg.label && r.seg.label !== "Easy cruise"));
         const strides = rep.rows.filter(r => r.seg.type === "stride" && r.paceSec);
         const done = games.filter(r => r.status !== "skipped").length;
+        const f = run.funResults;
+        if (f) {
+            // What the FunCoach measured during the run
+            const bursts = (f.bursts || []).map(([i, pace]) => ({ label: (run.guided.segments[i] || {}).label || "Burst", pace }));
+            const best = bursts.length ? Math.min(...bursts.map(b => b.pace)) : null;
+            const chases = (f.escaped || 0) + (f.caught || 0);
+            const steps = f.steps || [];
+            const lines = [`You played <b>${done}</b> game${done === 1 ? "" : "s"}`];
+            if (chases) lines.push(`got away <b>${f.escaped}</b> of ${chases} time${chases === 1 ? "" : "s"}`);
+            if (steps.length) lines.push(`took <b>${Math.max(...steps.map(x => x[1]))}</b> steps in your best quick-feet`);
+            return `
+                <h3>Fun report</h3>
+                <p class="rd-guided-summary">${lines.join(", ")}.${f.finish ? ` Photo finish: <b>${formatPace(f.finish)}</b> /km.` : ""}</p>
+                ${bursts.length ? `<div class="rd-checkins">${bursts.map(b =>
+                    `<span class="rd-checkin stride${b.pace === best ? " best" : ""}"><b>${formatPace(b.pace)}</b><small>${escapeHtml(b.label)}</small></span>`).join("")}</div>
+                <p class="gr-note">Burst paces per km${best ? `; your quickest was ${formatPace(best)}` : ""}. Bursts are short, so GPS pace is rough.</p>` : ""}`;
+        }
         return `
             <h3>Fun report</h3>
             <p class="rd-guided-summary">You played <b>${done}</b> game${done === 1 ? "" : "s"}${strides.length ? ` and ran <b>${strides.length}</b> stride${strides.length > 1 ? "s" : ""}` : ""}.</p>
@@ -474,7 +491,7 @@ const RunDetail = (() => {
         const rep = RunAnalysis.guidedReport(run, run.guided, p5);
         if (!rep) { box.innerHTML = checkInsHtml(run); return; }
         if (run.guided.segments.some(x => x.type === "play")) {
-            box.innerHTML = funSummaryHtml(rep);
+            box.innerHTML = funSummaryHtml(rep, run);
             return;
         }
         const hrText = (r) => {

@@ -287,6 +287,78 @@ const WeeklyReport = (() => {
         return null;
     }
 
+    // ─── To work on ──────────────────────────────────────────────────────────
+    // What fell short this week, said plainly with what to do about it: a report
+    // that only praises isn't much use. At most two, the most useful first, and
+    // never the same thing as the week's observation.
+
+    // A run meant to be hard: the plan's harder session, or a guided course run (not a Fun Run)
+    function isHard(r) {
+        if (!r.guided) return false;
+        if (r.guided.plan) return r.guided.plan.role === "quality";
+        return !(r.guided.segments || []).some(x => x.type === "play");
+    }
+
+    function toWorkOn(week, sessions, usual, planned, observation) {
+        const out = [];
+        const done = week.runs.length + week.strengthDays;
+        if (planned && planned.sessions >= 2 && done < planned.sessions - 1) {
+            out.push({ rule: "plan", text: `You did ${done} of the ${planned.sessions} sessions you planned.`,
+                next: "Look at which days didn't work and move them before the week starts (Change this week's days), or plan fewer: a plan you keep beats one you don't." });
+        }
+        // Easy runs that weren't easy
+        const easyRated = week.runs.filter(r => r.rpe > 0 && !isHard(r));
+        const tooHard = easyRated.filter(r => r.rpe >= 6);
+        if (easyRated.length >= 2 && tooHard.length * 2 > easyRated.length && (!observation || observation.rule !== "all-moderate")) {
+            out.push({ rule: "easy-hard", text: `${tooHard.length} of your ${easyRated.length} easy runs felt ${tooHard.length === easyRated.length ? "hard" : "harder than easy"} (6 or more out of 10).`,
+                next: "Easy should feel like 3 or 4: slow enough to chat. Slow down, walk a bit if you need to, or try Just run so the pace doesn't pull you along." });
+        }
+        // The harder session's targets
+        const q = week.runs.filter(r => r.guided && r.guided.segments && r.guided.segments.some(x => x.pace));
+        let judged = 0, onTarget = 0, slow = 0;
+        q.forEach(r => {
+            const rep = ra().guidedReport(r, r.guided, ra().fiveKPace(sessions, r.startTime));
+            if (!rep) return;
+            judged += rep.judged; onTarget += rep.onTarget;
+            slow += rep.rows.filter(x => x.status === "slow").length;
+        });
+        if (judged >= 3 && onTarget / judged < 0.5) {
+            out.push({ rule: "targets", text: `Your paced sessions hit ${onTarget} of ${judged} targets${slow > judged / 2 ? ", mostly too slow" : ""}.`,
+                next: slow > judged / 2 ? "If heat, sleep or tiredness explain it, fine. If it happens again, accept slower paces when the app offers them." : "Aim to run each part at its pace, not quicker: even is better than heroic." });
+        }
+        // A long stretch without anything
+        const days = [...new Set(sessions.filter(x => x.endTime && x.startTime < week.end && x.startTime >= addWeeks(week.start, -1) && (!x.activity || (x.activity === "strength" && !x.light)))
+            .map(x => dayKey(x.startTime)))].sort();
+        let longest = 0;
+        const noon = (k) => new Date(k + "T12:00").getTime();
+        for (let i = 1; i < days.length; i++) {
+            if (noon(days[i]) >= week.start) longest = Math.max(longest, Math.round((noon(days[i]) - noon(days[i - 1])) / DAY_MS) - 1);
+        }
+        // ...and the days at the end of the week after the last one
+        if (days.length) longest = Math.max(longest, Math.round((week.end - DAY_MS / 2 - noon(days[days.length - 1])) / DAY_MS));
+        if (longest >= 4) {
+            out.push({ rule: "gap", text: `${longest} days in a row without a run or workout.`,
+                next: "Short sessions count: a 20-minute easy run or five minutes of foot core keeps the habit going on a busy day." });
+        }
+        if (week.strengthDays < 2 && !(observation && ["strength", "pattern"].includes(observation.rule))) {
+            out.push({ rule: "strength", text: week.strengthDays ? "Only one strength day." : "No strength days.",
+                next: "Two a week is the guide (WHO), and it's what makes running economy and injury risk better. 30 minutes at home is enough." });
+        }
+        const unrated = week.runs.length - week.ratedRuns;
+        if (unrated >= 2) {
+            out.push({ rule: "ratings", text: `${unrated} of your ${week.runs.length} runs have no "how hard was that?" rating.`,
+                next: "Tap a number after each run. It's how the report knows how hard the week really was." });
+        }
+        if (usual.length >= 3) {
+            const usualWalk = mean(usual.map(u => u.walkMin));
+            if (usualWalk >= 60 && week.walkMin < usualWalk / 2) {
+                out.push({ rule: "walking", text: `Walking dropped to ${Math.round(week.walkMin)} minutes, from about ${Math.round(usualWalk)}.`,
+                    next: "Walks are easy volume that doesn't tire you for running. A couple of brisk ones would bring it back." });
+            }
+        }
+        return out.slice(0, 2);
+    }
+
     // ─── What to say ─────────────────────────────────────────────────────────
 
     function clock(seconds) {
@@ -494,7 +566,8 @@ const WeeklyReport = (() => {
     // sessions: finished records from the runs store. health: { sleep, resting } or
     // null. paused: Mondays you marked as ill or away. Everything is about the week
     // starting `start`; nothing after it is looked at.
-    function build({ sessions, start, health = null, paused = new Set() }) {
+    // planned: { sessions } from the training plan, if you have one
+    function build({ sessions, start, health = null, paused = new Set(), planned = null }) {
         const end = addWeeks(start, 1);
         const known = sessions.filter(s => s.endTime && s.startTime < end);
         const week = tally(known, start);
@@ -509,7 +582,11 @@ const WeeklyReport = (() => {
         };
         if (!week.sessions.length) return Object.assign(base, { light: true, line: "Nothing logged this week. It happens.", source });
         if (base.paused) return Object.assign(base, { light: true, line: `${summary(week)} Left out of your comparisons, as you asked.`, source });
-        if (week.days < MIN_LOGGED_DAYS) return Object.assign(base, { light: true, line: `A light week. ${summary(week)}`, source });
+        if (week.days < MIN_LOGGED_DAYS) {
+            const missed = planned && planned.sessions >= 2 ? [{ rule: "plan", text: `${week.sessions.length ? "Only one day" : "Nothing"} of the ${planned.sessions} sessions you planned.`,
+                next: "Weeks like this happen. If it was illness or travel, tap \"Ill or away\" below. Otherwise, pick one session you'll definitely do next week and start there." }] : [];
+            return Object.assign(base, { light: true, line: `A light week. ${summary(week)}`, toWorkOn: missed, source });
+        }
 
         // Load needs the ratings: without most of them it would mostly measure how often you tapped
         const rated = (t) => t.runMin > 0 && t.ratedMin >= 0.75 * t.runMin;
@@ -527,13 +604,14 @@ const WeeklyReport = (() => {
         const adjusted = week.briskMin + 2 * week.runMin;
         return Object.assign(base, {
             light: false, line: summary(week), wentWell: wentWell(week, known, usual),
+            toWorkOn: toWorkOn(week, known, usual, planned, observation),
             rows: numbers(week, usual, useLoad), active,
             observation, longest: longest >= 1000 ? { km: longest / 1000, top: longest * LONG_RATIO / 1000 } : null,
             activeMinutes: Math.round(adjusted), review: isBlockWeek(start) ? review(context) : null, source,
         });
     }
 
-    return { VERSION, monday, addWeeks, dayKey, median, tier, tally, load, briskMinutes, steady, cleanHeartRate, longRun, effortDrift, restingHeartRate, sleepSummary, consistency, isBlockWeek, build };
+    return { VERSION, monday, addWeeks, dayKey, median, tier, tally, toWorkOn, load, briskMinutes, steady, cleanHeartRate, longRun, effortDrift, restingHeartRate, sleepSummary, consistency, isBlockWeek, build };
 })();
 
 if (typeof module !== "undefined") module.exports = WeeklyReport;

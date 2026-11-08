@@ -868,6 +868,26 @@ function fakeRuns(n, km, pace, now) {
         return total - last;
     });
     assert(Math.min(...easyEnd) >= 240, `At least 4 easy minutes after the last burst (shortest ${Math.round(Math.min(...easyEnd))} s)`);
+    // The games (FunCoach)
+    assert(funSessions.every(s => s.segments.some(x => x.game === "finish") && s.segments.some(x => x.game === "burst")), "Every Fun Run has timed bursts and a photo finish");
+    assert(funSessions.every(s => s.segments.filter(x => x.game === "chase").every(x => x.duration * 60 <= 60 && x.chaser)), "Chases last a minute at most, and something is chasing");
+    assert(funSessions.filter(s => s.segments.some(x => x.game === "chase")).length >= funSessions.length * 0.8, "Most Fun Runs have a chase");
+    assert(funSessions.some(s => s.segments.some(x => x.game === "steps")), "Quick feet counts your steps");
+    const beginner = fun.levels.beginner.sessions;
+    assert([2, 5, 8, 11, 14, 17].every(i => /^Agent Runner \d/.test(beginner[i].title)) && /To be continued/.test(beginner[2].segments[beginner[2].segments.length - 1].say),
+        "Every week's third run is the next Agent Runner episode, ending on a cliffhanger");
+    const { mysteryFunRun, adaptFunRun } = new Function(require("fs").readFileSync("./courses.js", "utf8") + "; return { mysteryFunRun, adaptFunRun };")();
+    const mystery = mysteryFunRun("beginner", 7);
+    assert(mystery.mystery && mystery.segments.some(x => x.game === "burst") && JSON.stringify(mysteryFunRun("beginner", 7)) === JSON.stringify(mystery), "Surprise me: a mystery run, the same for the same seed");
+    const plain = beginner[0];
+    const hot = adaptFunRun(plain, { feelsC: 35 }, 9);
+    assert(hot.session.segments.filter(x => x.game === "burst" || x.game === "finish").every(x => Math.round(x.duration * 60) === 10), "Hot day: bursts of 10 s");
+    assert(hot.session.segments.filter(x => x.type === "walk").every((x, i) => x.duration > plain.segments.filter(y => y.type === "walk")[i].duration), "Hot day: longer walks");
+    assert(hot.session.segments.some(x => x.label === "Shade hunt") && /hot today, 35 degrees/.test(hot.session.segments[0].say), "Hot day: shade, and it says why");
+    assert(plain.segments.every(x => x.label !== "Shade hunt"), "...without changing the course itself");
+    assert(adaptFunRun(plain, { feelsC: 20, precipMm: 2 }, 9).session.segments.some(x => x.label === "Puddle dodge"), "Rain: puddle dodging");
+    assert(/Night run/.test(adaptFunRun(plain, null, 21).session.segments[0].say), "After dark: be seen");
+    assert(adaptFunRun(plain, { feelsC: 20 }, 9).notes.length === 0, "A mild day changes nothing");
     const titles = funSessions.slice(0, 6).map(s => s.title);
     assert(new Set(titles).size === 6, "The first two weeks use six different themes");
     const said = funSegs.map(x => x.say).join(" ");
@@ -1492,6 +1512,100 @@ function gym(day, weight, target, done, ex = benchEx) {
     assert(RunAnalysis.groupRoutes(others).length === 0, "...or your routes");
     const fast = Array.from({ length: 5 }, (_, i) => Object.assign(sampleRun(900, now - (i + 1) * 86400000), { activity: "walk" }));
     assert(TuneInPlanner.plan(fast, now).ready === false, "...or Tune-In's learning");
+})();
+
+// ─── Fun Run games (FunCoach; FunCoachTest.kt has the same cases) ───────────
+
+(function testFunCoach() {
+    const { FunCoach } = require("./coach.js");
+    const game = (kind, seconds, chaser) => ({ type: "run", durationMs: seconds * 1000, game: kind, chaser });
+    const easy = { type: "run", durationMs: 60000 };
+    // One segment at a steady pace (s/km, null = standing still), ticking every 500 ms
+    const leg = (c, index, t0, d0, ms, pace) => {
+        const { ended, said: after } = c.startSegment(index, t0, d0);
+        const said = ended.concat(after);
+        for (let t = t0; t < t0 + ms; t += 500) said.push(...c.tick(t, d0 + (pace == null ? 0 : (t - t0) / pace)));
+        return { said, t: t0 + ms, d: d0 + (pace == null ? 0 : ms / pace) };
+    };
+
+    let c = new FunCoach([game("burst", 20), easy, game("burst", 20), easy, game("burst", 20), easy], { bestBurst: 240 });
+    let r = leg(c, 0, 0, 0, 20000, 250);
+    r = leg(c, 1, r.t, r.d, 60000, 400);
+    assert(r.said[0] === "4 10 per kilometre. Nice.", "Burst: its pace, said straight after");
+    r = leg(c, 2, r.t, r.d, 20000, 245);
+    r = leg(c, 3, r.t, r.d, 60000, 400);
+    assert(r.said[0] === "4 oh 5 per kilometre. 5 seconds quicker than the last one!", "Burst: against the last one");
+    r = leg(c, 4, r.t, r.d, 20000, 235);
+    assert(c.finish(r.t, r.d)[0] === "3 55 per kilometre. Your quickest burst this month!" && c.results.bursts.length === 3, "Burst: against your best this month");
+
+    c = new FunCoach([game("chase", 60, "zombie"), easy], { easyPace: 360 });
+    r = leg(c, 0, 0, 0, 60000, 360);
+    assert(r.said.includes("The zombie is right behind you! Go, go!") && r.said.includes("45 metres."), "Chase: the gap is called out as it closes");
+    assert(c.buzz.splice(0).join() === "start,close", "Chase: buzzes at the start and when it's close");
+    assert(c.finish(r.t, r.d)[0] === "You got away! Back to easy." && c.results.escaped === 1 && c.buzz.splice(0).join() === "end", "Chase: escaped");
+
+    c = new FunCoach([game("chase", 60, "dog"), easy], { easyPace: 360 });
+    r = leg(c, 0, 0, 0, 60000, null);
+    assert(r.said.includes("The dog caught you! Shake it off. You'll get away next time."), "Chase: caught, cheerfully");
+    assert(c.finish(r.t, r.d).length === 0 && c.results.caught === 1 && c.buzz.splice(0).join() === "start,close,end", "Chase: caught counts once, one end buzz");
+
+    c = new FunCoach([game("steps", 10), easy], { bestSteps: 25 });
+    c.startSegment(0, 0, 0, 100);
+    assert(c.finish(10000, 30, 130)[0] === "30 steps. That's 180 a minute! Your most yet!" && c.buzz.length === 0, "Steps: counted from the step counter");
+
+    c = new FunCoach([game("finish", 20)]);
+    c.startSegment(0, 0, 0);
+    assert(c.finish(20000, 83.333333)[0] === "Photo finish: 4 minutes per kilometre.", "Photo finish: the first one");
+    c = new FunCoach([game("finish", 20)], { bestFinish: 250 });
+    c.startSegment(0, 0, 0);
+    assert(c.finish(20000, 83.333333)[0] === "Photo finish: 4 minutes per kilometre. Your best finish yet!", "Photo finish: a new best");
+
+    c = new FunCoach([game("burst", 20)]);
+    c.startSegment(0, 0, 0);
+    assert(c.finish(20000, 10).length === 0, "A burst too short for GPS says nothing");
+})();
+
+// ─── Weekly report: what to work on, and fitness age ────────────────────────
+
+(function testBalancedReport() {
+    const WR = require("./weekly-report.js");
+    const DAY = 86400000;
+    const mon = new Date(2026, 10, 2, 0).getTime();
+    const at = (d, h = 7) => mon + d * DAY + h * 3600000;
+    const run = (d, extra = {}) => Object.assign({ runId: at(d), startTime: at(d), endTime: at(d) + 1800000, distance: 5000, time: 1800, pace: 360,
+        timeSeries: [{ distance: 2500, time: 900000 }, { distance: 5000, time: 1800000 }] }, extra);
+    const gym = (d) => ({ runId: at(d, 18), activity: "strength", title: "Full body A", startTime: at(d, 18), endTime: at(d, 18) + 1800000, distance: 0, time: 1800, pace: 0, exercises: [] });
+    const work = (sessions, planned) => WR.build({ sessions, start: mon, planned }).toWorkOn.map(x => x.rule);
+
+    // A good week: nothing to say, and it says so
+    const good = [run(1, { rpe: 3 }), gym(0), run(3, { rpe: 4 }), gym(4), run(6, { rpe: 3 })];
+    assert(work(good, { sessions: 5 }).length === 0, "A week that went to plan: nothing to work on");
+    // Two of five planned
+    assert(work([run(1, { rpe: 3 }), gym(3)], { sessions: 5 })[0] === "plan", "Missed most of the plan: said first");
+    assert(!work([run(1, { rpe: 3 }), gym(0), run(3, { rpe: 3 }), gym(4)], { sessions: 5 }).includes("plan"), "One short of the plan is fine");
+    // Easy runs that weren't
+    const hardEasy = work([run(1, { rpe: 7 }), gym(0), run(3, { rpe: 6 }), gym(4), run(6, { rpe: 3 })], { sessions: 5 });
+    assert(hardEasy.includes("easy-hard"), "Easy runs rated 6+ get called out");
+    const intervals = { guided: { plan: { role: "quality" }, segments: [] } };
+    assert(!work([run(1, Object.assign({ rpe: 8 }, intervals)), gym(0), run(3, { rpe: 3 }), gym(4), run(6, { rpe: 4 })], { sessions: 5 }).includes("easy-hard"), "A hard session is meant to be hard");
+    // Unrated runs, and a long gap
+    assert(work([run(0), run(1), gym(2), gym(3)], null).includes("ratings"), "Unrated runs: asks for ratings");
+    const gap = work([run(0, { rpe: 3 }), gym(0), run(1, { rpe: 3 }), gym(1)], null);
+    assert(gap.includes("gap"), "Five days with nothing at the end of the week: called out");
+    assert(work([run(1, { rpe: 3 }), run(3, { rpe: 3 }), run(6, { rpe: 3 })], null)[0] === "strength", "No strength days: called out");
+    assert(work([run(1, { rpe: 3 }), run(3, { rpe: 3 }), run(6, { rpe: 3 }), gym(2), gym(4)], null).length <= 2, "Two things at most");
+    const light = WR.build({ sessions: [run(2)], start: mon, planned: { sessions: 5 } });
+    assert(light.light && light.toWorkOn.length === 1 && /Ill or away/.test(light.toWorkOn[0].next), "A light week against a plan: said kindly, with a way out");
+
+    // Fitness age (FRIEND 2022 treadmill medians)
+    const RA = require("./analysis.js");
+    const m = RA.fitnessAge(38.6, 50, "male");
+    assert(m.age === 35 && Math.abs(m.norm - 32.1) < 0.1, `Fitness age: a man of 50 at the median for 35 (38.6) is 35 (${m.age}, norm at 50 ${m.norm})`);
+    assert(RA.fitnessAge(32.1, 50, "male").age === 50, "...and at his own age's median, his own age");
+    assert(RA.fitnessAge(25.9, 30, "female").age === 45, "Women have their own medians");
+    assert(RA.fitnessAge(60, 35, "male").below20 && RA.fitnessAge(60, 35, "male").age === 20, "Fitter than the youngest median: under 20");
+    assert(RA.fitnessAge(12, 35, "male").above90, "Below the oldest median: over 89");
+    assert(RA.fitnessAge(45, 35, null) === null && RA.fitnessAge(null, 35, "male") === null, "No age or sex, no fitness age");
 })();
 
 // ─── The training plan (training-plan.js) ────────────────────────────────────

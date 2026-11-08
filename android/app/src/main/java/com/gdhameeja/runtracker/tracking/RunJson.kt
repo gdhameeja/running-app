@@ -25,11 +25,18 @@ object RunJson {
                     say = s.optNullableString("say"),
                     role = s.optNullableString("role"),
                     pace = if (s.has("pace") && !s.isNull("pace")) s.getDouble("pace") else null,
+                    game = s.optNullableString("game"),
+                    chaser = s.optNullableString("chaser"),
                 )
             }
         },
         meta = json.optString("meta").ifEmpty { null },
+        funRef = json.optJSONObject("fun")?.let {
+            FunRef(it.optNum("easyPace"), it.optNum("bestBurst"), it.optNum("lastBurst"), it.optNum("bestFinish"), it.optNum("bestSteps")?.toInt())
+        },
     )
+
+    private fun JSONObject.optNum(key: String): Double? = if (has(key) && !isNull(key)) getDouble(key) else null
 
     private fun JSONObject.optNullableString(key: String): String? =
         if (has(key) && !isNull(key)) getString(key).ifEmpty { null } else null
@@ -75,6 +82,9 @@ object RunJson {
             })
         }
         if (e.config.ghost != null) put("ghostWon", e.ghostWon ?: JSONObject.NULL)
+        e.funCoach?.chaseState(e.elapsedMs(now), e.totalDistance)?.let { (who, gap, caught) ->
+            put("chase", JSONObject().put("chaser", who).put("gap", gap).put("caught", caught))
+        }
         e.coach?.let { c ->
             val active = e.coachActive
             put("coach", JSONObject().apply {
@@ -121,6 +131,15 @@ object RunJson {
                 })
             })
         }
+        e.funCoach?.let { put("funResults", funResults(it)) }
+    }
+
+    private fun funResults(f: FunCoach): JSONObject = JSONObject().apply {
+        put("bursts", JSONArray().apply { f.results.bursts.forEach { (i, p) -> put(JSONArray().put(i).put(p)) } })
+        put("finish", f.results.finish ?: JSONObject.NULL)
+        put("escaped", f.results.escaped)
+        put("caught", f.results.caught)
+        put("steps", JSONArray().apply { f.results.steps.forEach { (i, n) -> put(JSONArray().put(i).put(n)) } })
     }
 
     private fun engineState(e: RunEngine): JSONObject {
@@ -142,6 +161,16 @@ object RunJson {
             put("ghostDoneAnnounced", s.ghostDoneAnnounced)
             put("everFixed", s.everFixed)
             put("pausedAt", s.pausedAt)
+            e.funCoach?.let { f ->
+                put("fun", JSONObject().apply {
+                    put("seg", f.seg)
+                    f.start?.let { st -> put("start", JSONArray().put(st.t).put(st.dist).put(st.steps ?: JSONObject.NULL)) }
+                    f.chase?.let { c -> put("chase", JSONArray().put(c.speed).put(c.saidAt).put(c.close).put(c.caught)) }
+                    put("results", funResults(f))
+                    put("ref", JSONArray().put(f.bestBurst ?: JSONObject.NULL).put(f.lastBurst ?: JSONObject.NULL)
+                        .put(f.bestFinish ?: JSONObject.NULL).put(f.bestSteps ?: JSONObject.NULL))
+                })
+            }
             e.coach?.state()?.let { c ->
                 put("coach", JSONObject().apply {
                     put("scale", c.scale)
@@ -198,6 +227,22 @@ object RunJson {
                 c.getDouble("segStartDist"), c.getLong("nextCheckAt"),
                 c.getJSONArray("results").arrays().map { PaceCoach.Result(it.getInt(0), it.getDouble(1), it.optNumber(2)) },
             ))
+        }
+        st.optJSONObject("fun")?.let { j ->
+            val f = e.funCoach ?: return@let
+            f.seg = j.getInt("seg")
+            j.optJSONArray("start")?.let { a -> f.start = FunCoach.Start(a.getLong(0), a.getDouble(1), if (a.isNull(2)) null else a.getLong(2)) }
+            j.optJSONArray("chase")?.let { a -> f.chase = FunCoach.Chase(a.getDouble(0), a.getLong(1), a.getBoolean(2), a.getBoolean(3)) }
+            j.optJSONObject("results")?.let { r ->
+                r.getJSONArray("bursts").arrays().forEach { f.results.bursts += it.getInt(0) to it.getDouble(1) }
+                f.results.finish = if (r.isNull("finish")) null else r.getDouble("finish")
+                f.results.escaped = r.getInt("escaped")
+                f.results.caught = r.getInt("caught")
+                r.getJSONArray("steps").arrays().forEach { f.results.steps += it.getInt(0) to it.getInt(1) }
+            }
+            j.optJSONArray("ref")?.let { a ->
+                f.bestBurst = a.optNumber(0); f.lastBurst = a.optNumber(1); f.bestFinish = a.optNumber(2); f.bestSteps = a.optNumber(3)?.toInt()
+            }
         }
         e.restore(
             EngineState(

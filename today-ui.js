@@ -1,5 +1,6 @@
-// today-ui.js — The top of the home screen: what today is for, your week at a
-// glance, the plan's settings and your shoes. The planning is in training-plan.js.
+// today-ui.js — "Your plan", the course the app plans for you, at the top of the
+// Courses tab: what today is for, your week at a glance, the plan's settings and
+// your shoes. The planning is in training-plan.js.
 //
 // Records in the course progress store (so they sync and back up):
 //   "training-plan"  see training-plan.js
@@ -114,8 +115,8 @@ const Today = (() => {
 
     function setupHtml() {
         return `<div class="today-card today-setup">
-            <h3>Plan your week</h3>
-            <p>Say how often you want to run and do strength, and the app tells you what each day is for: easy runs, one harder session, a long run that grows safely, and your full-body workouts. It adjusts to how your runs go.</p>
+            <div class="cc-header"><span class="cc-icon">🗓️</span><span class="cc-name">Your plan</span></div>
+            <p>A course the app plans for you. Say how often you want to run and do strength, and it tells you what each day is for: easy runs, one harder session, a long run that grows safely, and your full-body workouts. It adjusts to how your runs go.</p>
             <div class="sp-row"><button class="up-next-start" id="today-quick"><span class="material-icons">check</span> Use the suggested week</button></div>
             <button class="link-btn" id="today-setup">Choose my own days</button>
         </div>`;
@@ -221,6 +222,7 @@ const Today = (() => {
         })();
 
         return `<div class="today-card">
+            <div class="cc-header"><span class="cc-icon">🗓️</span><span class="cc-name">Your plan</span></div>
             ${stripHtml(days, ctx)}${target}${parts.join("")}
             <div class="today-main">${sessionHtml(shown, ctx, isToday)}${extras}${next}</div>
             <div class="today-links">
@@ -407,7 +409,7 @@ const Today = (() => {
             plan = draft;
             save(plan).then(() => {
                 closePlan(false);
-                showToast(fresh ? "Your plan is set. The top of the Run tab shows what each day is for." : "Plan saved.", 3500);
+                showToast(fresh ? "Your plan is set. It's at the top of Courses, with what each day is for." : "Plan saved.", 3500);
             });
         });
     }
@@ -431,5 +433,8 @@ const Today = (() => {
     // Your shoes, for the run details page: [{ id, name }]
     const shoeList = () => (shoes ? shoes.list : []).map(s => ({ id: s.id, name: s.name, retired: !!s.retired }));
 
-    return { init, render, openPlan, shoeFor, shoeNote, shoeList, weekLines, comebackFor: (t) => P().comeback(lastRuns, t), hasPlan: () => !!plan };
+    // For the weekly report: how many sessions the plan had in a week, or null without a plan
+    const plannedFor = (monday) => plan ? { sessions: P().weekTarget(plan, monday) } : null;
+
+    return { init, render, openPlan, shoeFor, shoeNote, shoeList, weekLines, plannedFor, comebackFor: (t) => P().comeback(lastRuns, t), hasPlan: () => !!plan };
 })();

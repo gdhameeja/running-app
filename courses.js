@@ -459,6 +459,12 @@ function enduranceExpertSessions() {
 //    looking outward (Sturm et al. 2020) make effort feel easier.
 //  - Sessions finish gently with a celebration: how a session ends shapes how
 //    you remember it (Zenko, Ekkekakis & Ariely 2016).
+//  - It answers back (FunCoach in coach.js): every burst is timed and compared
+//    with your best this month, a chase has something gaining on you until you
+//    get away, quick-feet games count your steps, and a photo finish is timed.
+//  - Every third session is an episode of a spy story that carries on next time.
+//  - Hot, rainy or dark days change the session to suit (adaptFunRun), and
+//    "Surprise me" plans one you can't see coming (mysteryFunRun).
 
 function spokenDuration(sec) {
     if (sec < 60) return `${sec} seconds`;
@@ -476,7 +482,7 @@ function scripted(type, sec, intensity, label, say) {
 const FUN_MOVES = {
     handsUp: [10, "play", "Hands up!", "Hands up! Throw both arms up in the air like you just won something. Hold them high for {d}."],
     powerArms: [20, "play", "Power arms", "Power arms! Pump your arms strong and fast and let your legs follow. {d}."],
-    quickFeet: [15, "play", "Quick feet", "Quick feet! Tiny, fast, light steps, like the ground is hot. {d}."],
+    quickFeet: [15, "play", "Quick feet", "Quick feet! Tiny, fast, light steps, like the ground is hot. {d}. I'm counting."],
     highKnees: [15, "play", "High knees", "High knees! Lift those knees, light and bouncy. {d}."],
     buttKicks: [15, "play", "Butt kicks", "Butt kicks! Flick your heels up towards your bum. {d}."],
     skip: [20, "play", "Skip!", "Skip like a kid! Big, bouncy skips for {d}. Nobody's judging."],
@@ -500,11 +506,17 @@ const FUN_MOVES = {
     awe: [45, "run", "Look around", "Look up and around. Find the most beautiful thing you can see right now, and take it in."],
     countSteps: [30, "run", "Count steps", "Counting game! Count your steps up to thirty, then start again. Out loud if nobody's around."],
     breathe: [45, "run", "Breathe", "Breathing game. Breathe in for three steps, out for three steps. Find the rhythm."],
+    shade: [30, "run", "Shade hunt", "Shade hunt! Run to the next bit of shade and walk in it for a few breaths. Cool down, then carry on."],
+    puddles: [20, "play", "Puddle dodge", "Puddle dodge! Weave around the puddles, light and quick. {d}."],
 };
+// Moves the FunCoach measures
+const FUN_GAMES = { quickFeet: "steps" };
 
 function funMove(key) {
     const [sec, type, label, say] = FUN_MOVES[key];
-    return scripted(type, sec, "By feel", label, say.replace("{d}", spokenDuration(sec)));
+    const out = scripted(type, sec, "By feel", label, say.replace("{d}", spokenDuration(sec)));
+    if (FUN_GAMES[key]) out.game = FUN_GAMES[key];
+    return out;
 }
 
 const FUN_BURSTS = [
@@ -525,7 +537,25 @@ const FUN_WALKS = [
 // Your best pace, short enough that it stays fun
 function funBurst(sec, n) {
     const [label, say] = FUN_BURSTS[n % FUN_BURSTS.length];
-    return scripted("stride", sec, "Your best pace, short and sharp", label, say.replace("{d}", spokenDuration(sec)));
+    return Object.assign(scripted("stride", sec, "Your best pace, short and sharp", label, say.replace("{d}", spokenDuration(sec))), { game: "burst" });
+}
+
+// Something gaining on you: the FunCoach calls out the gap until you get away
+const FUN_CHASERS = {
+    zombie: ["Zombie!", "A zombie just shuffled out 50 metres behind you, and it's a little quicker than your jog. Get away! {d}."],
+    dog: ["Dog chase!", "A very excited dog wants to play, 50 metres back. Stay ahead of it for {d}. Go!"],
+    bus: ["Bus race!", "Your bus is 50 metres behind and catching up. Beat it to the next stop! {d}."],
+};
+
+function funChase(sec, chaser, say) {
+    const [label, line] = FUN_CHASERS[chaser];
+    // Only a little quicker than your jog: a steady run to stay ahead, not a sprint
+    return Object.assign(scripted("run", sec, "Stay ahead", label, (say || line).replace("{d}", spokenDuration(sec))), { game: "chase", chaser });
+}
+
+function funFinish(sec, say) {
+    return Object.assign(scripted("stride", sec, "Everything you've got", "Photo finish!",
+        (say || "Photo finish! Last {d}, everything you've got. Go!").replace("{d}", spokenDuration(sec))), { game: "finish" });
 }
 
 function funWalk(sec, n) {
@@ -547,12 +577,65 @@ function funCruise(sec, n) {
 
 // `game` is a longer mind game played once, halfway through
 const FUN_THEMES = [
-    { title: "Playground", moves: ["skip", "highKnees", "buttKicks", "airplane", "handsUp", "zigzag", "quickFeet"], game: "countSteps" },
-    { title: "Treasure Hunt", moves: ["zigzag", "shoulderTaps", "handsUp", "airplane", "highFive", "quickFeet"], game: "colourHunt" },
-    { title: "Anime Hero", moves: ["naruto", "ninja", "powerArms", "slowMo", "airPunch", "superhero"], game: "breathe" },
-    { title: "Silly Run", moves: ["trex", "robot", "slowMo", "shoulderTaps", "sideShuffle", "buttKicks"] },
-    { title: "Superhero", moves: ["superhero", "airplane", "powerArms", "naruto", "selfTalk", "airPunch"], game: "awe" },
-    { title: "Party Run", moves: ["airPunch", "handsUp", "conductor", "robot", "skip", "smile", "shake"] },
+    { title: "Playground", moves: ["skip", "highKnees", "buttKicks", "airplane", "handsUp", "zigzag", "quickFeet"], game: "countSteps", chaser: "dog" },
+    { title: "Treasure Hunt", moves: ["zigzag", "shoulderTaps", "handsUp", "airplane", "highFive", "quickFeet"], game: "colourHunt", chaser: "dog" },
+    { title: "Anime Hero", moves: ["naruto", "ninja", "powerArms", "slowMo", "airPunch", "superhero"], game: "breathe", chaser: "zombie" },
+    { title: "Silly Run", moves: ["trex", "robot", "slowMo", "shoulderTaps", "sideShuffle", "buttKicks", "quickFeet"], chaser: "bus" },
+    { title: "Superhero", moves: ["superhero", "airplane", "powerArms", "naruto", "selfTalk", "airPunch"], game: "awe", chaser: "zombie" },
+    { title: "Party Run", moves: ["airPunch", "handsUp", "conductor", "robot", "skip", "smile", "shake", "quickFeet"], chaser: "bus" },
+];
+
+// Agent Runner: one episode a week (each week's third session), each ending on a cliffhanger
+const STORY_MOVES = ["ninja", "slowMo", "sideShuffle", "quickFeet", "zigzag", "superhero"];
+const STORY = [
+    {
+        title: "The Briefing",
+        intro: "Agent Runner, episode one: The Briefing. This is Control. A courier is carrying a stolen map across the city, and you're going to follow them. Warm up easy and blend in with the crowd.",
+        bursts: ["The courier's turned a corner. Close the gap, {d}! Go!", "Don't lose them at the crossing! {d}, go!"],
+        chase: "You've been spotted! A guard dog is 50 metres behind you, and it's quick. Lose it! {d}.", chaser: "dog",
+        finish: "They're getting into a car! Last {d}, everything you've got!",
+        end: "The courier slipped into an old cinema, and the lights went out. To be continued.",
+    },
+    {
+        title: "The Cinema",
+        intro: "Agent Runner, episode two: The Cinema. Last time, the courier vanished into an old cinema. It's dark in here. Easy steps while your eyes adjust.",
+        bursts: ["A door slams upstairs. Get there, {d}!", "Footsteps on the fire escape! After them, {d}!"],
+        chase: "The night guard's woken up, 50 metres behind you. Don't let him see your face! {d}.", chaser: "dog",
+        finish: "The back door's closing! Last {d}, go!",
+        end: "On the projector reel, a message: meet me at the harbour at midnight. Signed by your old partner. Who you thought was gone. To be continued.",
+    },
+    {
+        title: "The Harbour",
+        intro: "Agent Runner, episode three: The Harbour. Midnight. Fog rolls in off the water. Keep it easy and quiet.",
+        bursts: ["A speedboat's starting up. Sprint to the pier, {d}!", "Crates are falling! Dodge through, {d}!"],
+        chase: "Something's coming out of the fog behind you, 50 metres back, and it doesn't walk like a person. Run! {d}.", chaser: "zombie",
+        finish: "The boat's leaving! Jump for it! {d}!",
+        end: "Your old partner hands you a key and says: trust no one, not even Control. Then sirens. To be continued.",
+    },
+    {
+        title: "The Rooftops",
+        intro: "Agent Runner, episode four: The Rooftops. Up on the roofs the city is quiet. Light feet, Agent. Easy running.",
+        bursts: ["Gap between buildings! Speed up and leap, {d}!", "A drone's spotted you. Out of its camera, {d}!"],
+        chase: "Rooftop security, 50 metres back and gaining. Stay ahead! {d}.", chaser: "dog",
+        finish: "Down the fire escape before they cut you off! {d}!",
+        end: "The key opens a locker. Inside: a photo of Control, shaking hands with the courier. To be continued.",
+    },
+    {
+        title: "The Double Agent",
+        intro: "Agent Runner, episode five: The Double Agent. Control is in on it. Nobody can know what you know. Easy, normal, nothing to see here.",
+        bursts: ["Control's people are searching the street. Duck out of sight, {d}!", "There's your partner across the square! Get to them, {d}!"],
+        chase: "They've sent the bus. A whole bus of agents, 50 metres back. Beat it to the corner! {d}.", chaser: "bus",
+        finish: "The map is in the post office. It closes in {d}! Go!",
+        end: "You've got the map. Then your earpiece crackles: Hello, Agent. We need to talk. It's Control. To be continued.",
+    },
+    {
+        title: "The Finale",
+        intro: "Agent Runner, the finale. One last run, Agent. Get the map to the embassy before Control gets to you. Warm up easy. You're ready for this.",
+        bursts: ["Through the market, {d}! Go!", "Across the bridge before it lifts, {d}!"],
+        chase: "Control himself, 50 metres behind. This is it. Get away! {d}.", chaser: "zombie",
+        finish: "The embassy gates! Last {d}, everything!",
+        end: "Mission complete, Agent. The map is safe and Control is in custody. Your partner smiles: see you next season. Brilliant running.",
+    },
 ];
 
 const FUN_LEVELS = {
@@ -564,19 +647,26 @@ const FUN_LEVELS = {
 
 // Easy running with a challenge every round: moves and speed bursts (each
 // followed by a walk) take turns, with the theme's game once, halfway.
-function funSession(week, day, theme, level) {
+function funSession(week, day, theme, level, episode = null) {
     const L = FUN_LEVELS[level];
     const mainS = L.main(week) * 60, gap = L.gap(week);
+    const chaseS = level === "beginner" ? 40 : level === "intermediate" ? 50 : 60;
     const segments = [
-        scripted("warmup", 240, "Easy jog", "Warm up",
-            `Welcome to ${theme.title}! Start with an easy jog, slow enough to chat. Walking is always allowed. ${spokenDuration(240)}.`),
+        scripted("warmup", 240, "Easy jog", "Warm up", episode ? `${episode.intro} ${spokenDuration(240)}.`
+            : `Welcome to ${theme.title}! Start with an easy jog, slow enough to chat. Walking is always allowed. ${spokenDuration(240)}.`),
         funMove("shake"),
     ];
     let used = 0, moves = 0, bursts = 0, gamePlayed = false;
     for (let i = 0; ; i++) {
         const round = [funCruise(gap, i)];
-        if (i % 2 === 1) {
-            round.push(funBurst(L.burst, bursts), funWalk(L.walk, bursts));
+        if (i % 2 === 1 && bursts % 3 === 2) {
+            // Every third challenge is a chase
+            const chaser = (episode && episode.chaser) || theme.chaser || "zombie";
+            round.push(funChase(chaseS, chaser, episode && episode.chase), funWalk(L.walk + 10, bursts));
+        } else if (i % 2 === 1) {
+            const b = funBurst(L.burst, bursts);
+            if (episode) { b.label = "Mission!"; b.say = episode.bursts[bursts % episode.bursts.length].replace("{d}", spokenDuration(L.burst)); }
+            round.push(b, funWalk(L.walk, bursts));
         } else if (theme.game && !gamePlayed && used >= mainS / 2) {
             round.push(funMove(theme.game));
         } else {
@@ -591,23 +681,76 @@ function funSession(week, day, theme, level) {
         else if (round[1].type === "run") gamePlayed = true;
         else moves++;
     }
+    // The photo finish is the last hard thing, with easy running after it: how a run
+    // ends is how you remember it
+    segments.push(funFinish(L.burst, episode && episode.finish), funWalk(30, 0));
     segments.push(funCruise(gap, 99));
     segments.push(scripted("play", 10, "By feel", "Victory!", "Victory finish! Both arms up, big smile. You did it!"));
-    segments.push(scripted("cooldown", 180, "Easy jog", "Cool down",
-        "Cool down. Walk or jog, your choice. Notice how good you feel right now, and remember it for next time."));
+    segments.push(scripted("cooldown", 180, "Easy jog", "Cool down", episode ? `Cool down, walk or jog. ${episode.end}`
+        : "Cool down. Walk or jog, your choice. Notice how good you feel right now, and remember it for next time."));
 
     const total = Math.round(segments.reduce((sum, x) => sum + x.duration, 0));
-    return session(week, day, theme.title, "fun", `${total} min · ${moves} moves · ${bursts} speed bursts`, segments);
+    const title = episode ? `Agent Runner ${STORY.indexOf(episode) + 1}: ${episode.title}` : theme.title;
+    return session(week, day, title, "fun", `${total} min · ${moves} moves · ${bursts} speed bursts and chases · photo finish`, segments);
 }
 
+// The theme for a session of the course: every week's third one is the next story episode
 function funRunSessions(level) {
     const s = [];
     for (let w = 1; w <= 6; w++) {
         for (let d = 1; d <= 3; d++) {
-            s.push(funSession(w, d, FUN_THEMES[((w - 1) * 3 + d - 1) % FUN_THEMES.length], level));
+            if (d === 3) {
+                s.push(funSession(w, d, { title: "Agent Runner", moves: STORY_MOVES }, level, STORY[w - 1]));
+            } else {
+                s.push(funSession(w, d, FUN_THEMES[((w - 1) * 2 + d - 1) % FUN_THEMES.length], level));
+            }
         }
     }
     return s;
+}
+
+// "Surprise me": a session you can't see, from a random theme and length
+function mysteryFunRun(level, seed = Date.now()) {
+    const rand = (n) => { seed = (seed * 9301 + 49297) % 233280; return Math.floor(seed / 233280 * n); };
+    const theme = FUN_THEMES[rand(FUN_THEMES.length)];
+    const sess = funSession(2 + rand(4), 1 + rand(3), theme, level);
+    return Object.assign(sess, { title: "Mystery run", mystery: true, description: "You won't know what's next until it happens." });
+}
+
+// Today's conditions change the session: shorter bursts and shade on a hot day,
+// puddles in the rain, and staying seen after dark. Returns { session, notes }.
+function adaptFunRun(sess, weather, hour) {
+    const out = JSON.parse(JSON.stringify(sess));
+    const notes = [];
+    const feels = weather ? (weather.feelsC != null ? weather.feelsC : weather.tempC) : null;
+    const hot = feels != null && feels >= 30;
+    const wet = weather && weather.precipMm > 0.2;
+    const dark = hour >= 19 || hour < 6;
+    let warm = "";
+    if (hot) {
+        warm += `It's hot today, ${Math.round(feels)} degrees: shorter bursts, longer walks, and look for shade. `;
+        notes.push(`Hot day (${Math.round(feels)}°C): shorter bursts, longer walks`);
+        let swapped = 0;
+        out.segments.forEach((x, i) => {
+            if (x.game === "burst" || x.game === "finish") { x.duration = 10 / 60; x.say = x.say.replace(/\d+ seconds|a minute/, "10 seconds"); }
+            if (x.game === "chase") x.duration = Math.min(x.duration, 0.5);
+            if (x.type === "walk") x.duration += 0.25;
+            if (x.type === "play" && !x.game && swapped < 2 && i > 2) { Object.assign(x, funMove("shade")); swapped++; }
+        });
+    }
+    if (wet) {
+        warm += "Rain run! Shorter steps on wet ground, and enjoy it: you're braver than everyone indoors. ";
+        notes.push("Rain: puddle dodging");
+        let swapped = 0;
+        out.segments.forEach(x => { if (x.type === "play" && !x.game && swapped < 2 && x.label !== "Victory!" && x.label !== "Shake it out") { Object.assign(x, funMove("puddles")); swapped++; } });
+    }
+    if (dark) {
+        warm += "Night run! Wear something bright or a light, and stay where it's lit. ";
+        notes.push("After dark: be seen");
+    }
+    if (warm) out.segments[0].say = warm + out.segments[0].say;
+    out.description = out.description + (notes.length ? ` · ${notes.join(", ")}` : "");
+    return { session: out, notes };
 }
 
 // ─── Export ────────────────────────────────────────────────────────────────────
@@ -618,7 +761,7 @@ const COURSES = [
         name: "Fun Run",
         icon: "🎉",
         shortDescription: "Playful runs you'll look forward to",
-        description: "Something every minute or so: Naruto runs, shoulder taps, airplanes, T-rex arms, and 15-20 second speed bursts at your best pace (race to a landmark, catch the bus) with a walk straight after to catch your breath. Easy, chatty running in between. Every session is different, and walking is always allowed.",
+        description: "Something every minute or so: Naruto runs, shoulder taps, airplanes, T-rex arms, and 15-20 second speed bursts at your best pace with a walk straight after. Every burst is timed and compared with your best, something chases you now and then, quick-feet games count your steps, and each run ends with a timed photo finish. Every third run is the next episode of Agent Runner, a spy story. Hot days, rain and dark evenings change the session to suit. Walking is always allowed.",
         levels: {
             beginner: {
                 duration: 6, sessionsPerWeek: 3,
