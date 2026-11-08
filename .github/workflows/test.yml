@@ -30,5 +30,15 @@ jobs:
         with:
           # The version is the commit count, so it needs the whole history
           fetch-depth: 0
+      # Gradle, the Kotlin compiler and the libraries, kept between runs: fewer
+      # downloads from GitHub releases, which sometimes time out
+      - uses: actions/cache@v4
+        with:
+          path: .gradle-cache
+          key: gradle-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
       - name: Kotlin tests and a debug build
+        env:
+          GRADLE_CACHE: ${{ github.workspace }}/.gradle-cache
         run: docker/build-apk.sh

@@ -5,9 +5,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 docker build -q -t runtracker-android-build -f docker/android-build.Dockerfile docker > /dev/null
-docker volume create runtracker-gradle-cache > /dev/null
-# New volumes are root-owned; hand the Gradle cache to the calling user
-docker run --rm -v runtracker-gradle-cache:/gradle runtracker-android-build chown "$(id -u):$(id -g)" /gradle
+# Gradle's downloads persist between builds: a Docker volume here, or a folder
+# when GRADLE_CACHE is set (GitHub Actions caches that folder between runs)
+if [ -n "${GRADLE_CACHE:-}" ]; then
+  mkdir -p "$GRADLE_CACHE"
+  GRADLE_MOUNT="$GRADLE_CACHE:/gradle"
+else
+  docker volume create runtracker-gradle-cache > /dev/null
+  # New volumes are root-owned; hand the Gradle cache to the calling user
+  docker run --rm -v runtracker-gradle-cache:/gradle runtracker-android-build chown "$(id -u):$(id -g)" /gradle
+  GRADLE_MOUNT="runtracker-gradle-cache:/gradle"
+fi
 
 # Version from the commit count: a later commit is always a higher versionCode,
 # and a GitHub release and a local build of the same commit agree.
@@ -29,16 +37,6 @@ grep -q "^[^:]*:[^:]*:$(id -u):" .android-user/passwd ||
 docker run --rm -u "$(id -u):$(id -g)" \
   -e HOME=/tmp/home -e GRADLE_USER_HOME=/gradle -e ANDROID_USER_HOME=/app/.android-user \
   -v "$PWD/.android-user/passwd":/etc/passwd:ro \
-  -v "$PWD":/app -v runtracker-gradle-cache:/gradle \
-  runtracker-android-build bash -c "
-    set -e
-    npm ci --no-audit --no-fund
-    npm test
-    npm run sync
-    cd android
-    # Gradle itself is downloaded on first use, and that download sometimes fails
-    # (a 504 from GitHub): try a few times before giving up on the build
-    for i in 1 2 3 4; do ./gradlew --no-daemon --version > /dev/null && break; [ \$i = 4 ] && exit 1; echo \"Gradle download failed, trying again in 30 s\"; sleep 30; done
-    ./gradlew --no-daemon -PversionCode=$VERSION_CODE -PversionName=$VERSION_NAME testDebugUnitTest assembleDebug $*
-  "
+  -v "$PWD":/app -v "$GRADLE_MOUNT" \
+  runtracker-android-build docker/inside-build.sh "$VERSION_CODE" "$VERSION_NAME" "$@"
 echo "APK: android/app/build/outputs/apk/debug/app-debug.apk (version $VERSION_NAME)"
