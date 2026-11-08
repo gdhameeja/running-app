@@ -25,13 +25,19 @@ const Gym = (() => {
     function loadRoutines() {
         return new Promise((resolve, reject) => {
             const req = db.transaction(["courseProgress"]).objectStore("courseProgress").get(ROUTINES_ID);
-            req.onsuccess = () => resolve(req.result ? req.result.routines : copy(StrengthPlanner.DEFAULT_ROUTINES));
+            req.onsuccess = () => resolve(req.result);
             req.onerror = (e) => reject(e.target.error);
+        }).then(record => {
+            if (!record) return copy(StrengthPlanner.DEFAULT_ROUTINES);
+            // Workouts saved before the full-body plan: bring it in, once
+            const upgraded = StrengthPlanner.upgradeRoutines(record);
+            if (!upgraded) return record.routines;
+            return saveCourseProgress(Object.assign({}, record, upgraded)).then(() => { CloudSync.soon(); return upgraded.routines; });
         });
     }
 
     function saveRoutines() {
-        return saveCourseProgress({ progressId: ROUTINES_ID, routines }).then(() => CloudSync.soon());
+        return saveCourseProgress({ progressId: ROUTINES_ID, routines, plan: StrengthPlanner.PLAN_VERSION }).then(() => CloudSync.soon());
     }
 
     // Survives the app being closed mid-workout
@@ -258,9 +264,12 @@ const Gym = (() => {
     function pickerHtml() {
         const feel = todayFeel();
         const f = feel.feel || feel.suggested || "normal";
-        return `<div class="gym-list">${routines.map((r, i) => `
-            <div class="gym-card">
-                <div class="gym-card-head"><b>${escapeHtml(r.title)}</b><button class="btn-small gym-edit" data-i="${i}">Edit</button></div>
+        const next = StrengthPlanner.upNext(routines, past);
+        return `<div class="gym-list">
+            <p class="gym-why">A full-body workout two or three times a week, taking them in turn. Leave a day between them.</p>
+            ${routines.map((r, i) => `
+            <div class="gym-card${i === next ? " gym-next" : ""}">
+                <div class="gym-card-head"><b>${escapeHtml(r.title)}</b>${i === next ? '<span class="gym-next-tag">Up next</span>' : ""}<button class="btn-small gym-edit" data-i="${i}">Edit</button></div>
                 <ul class="gym-plan">${r.exercises.map(ex => {
                     const t = StrengthPlanner.target(ex, past, f);
                     return `<li><span>${escapeHtml(t.variation || ex.name)}</span><b>${targetText(t)}</b><small>${escapeHtml(t.why || "")}</small></li>`;
@@ -305,6 +314,7 @@ const Gym = (() => {
         const head = `<div class="gym-progress">Exercise ${session.at + 1} of ${session.items.length} · Set ${n} of ${item.target.sets}</div>
             <div class="gym-name">${escapeHtml(label(item))}</div>
             ${item.ex.ladder ? `<div class="gym-progress">Step ${level + 1} of ${item.ex.ladder.length} · ${escapeHtml(item.ex.name)}</div>` : ""}
+            ${StrengthPlanner.how(label(item)) ? `<p class="gym-how">${escapeHtml(StrengthPlanner.how(label(item)))}</p>` : ""}
             ${item.target.why && n === 1 ? `<p class="gym-why">${escapeHtml(item.target.why)}</p>` : ""}
             ${canChange ? `<div class="sp-row"><button class="btn-small" id="gym-easier" ${level > 0 ? "" : "disabled"}>Easier</button><button class="btn-small" id="gym-harder" ${level < item.ex.ladder.length - 1 ? "" : "disabled"}>Harder</button></div>` : ""}`;
         const leave = `<div class="sp-row"><button class="btn-small" id="gym-skip">Skip exercise</button><button class="btn-small" id="gym-finish">Finish workout</button></div>`;

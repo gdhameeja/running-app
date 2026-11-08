@@ -442,7 +442,7 @@ function endRun(endTime) {
     if (!currentRunId) { closeRunScreen(); return Promise.resolve(); }
     return getRunById(currentRunId)
         .then(runData => {
-            runData = runData || { runId: currentRunId, startTime: startTime };
+            runData = runData || { runId: currentRunId, startTime: startTime, activity: currentActivity || undefined };
             runData.endTime = endTime;
             runData.distance = totalDistance;
             runData.time = runTime;

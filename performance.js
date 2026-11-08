@@ -2,7 +2,7 @@
 
 function calcPaceTrend(runs, limit = 20) {
     const sorted = runs
-        .filter(r => !r.activity && r.distance >= 500 && r.time > 0 && r.pace > 120 && r.pace < 1200)
+        .filter(r => !r.activity && r.distance >= 500 && r.time > 0 && r.pace >= RunAnalysis.MIN_PACE && r.pace < 1200)
         .sort((a, b) => a.startTime - b.startTime)
         .slice(-limit);
     return sorted.map(r => ({

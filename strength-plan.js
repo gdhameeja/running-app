@@ -33,12 +33,21 @@ const StrengthPlanner = (() => {
         ladder("back", "Back raises", ["Superman raise", "Reverse snow angel", "Prone Y raise"], 0, NO_EQUIPMENT, 8, 15, 60),
         ladder("bridge", "Glute bridges", ["Glute bridge", "Single-leg glute bridge", "Feet-raised single-leg bridge"], 0, NO_EQUIPMENT, 8, 15, 60),
         ladder("legraise", "Leg raises", ["Bent-knee leg raise", "Leg raise"], 0, NO_EQUIPMENT, 8, 15, 60),
-        ladder("calf", "Calf raises", ["Calf raise", "Single-leg calf raise"], 0, NO_EQUIPMENT, 12, 25, 45),
+        ladder("calf", "Calf raises", ["Calf raise", "Single-leg calf raise", "Single-leg calf raise off a step"], 0, NO_EQUIPMENT, 12, 25, 45),
         ladder("burpee", "Burpees", ["Step-back burpee", "Burpee"], 0, NO_EQUIPMENT, 6, 15, 90),
         hold("plank", "Plank", ["Knee plank", "Plank", "Long-lever plank"], 1),
         hold("sideplank", "Side plank", ["Knee side plank", "Side plank", "Side plank with leg lift"], 1, 15, 45),
         hold("hollow", "Hollow hold", ["Tuck hold", "Hollow hold"], 0, 15, 45),
         hold("wallsit", "Wall sit", ["Wall sit", "Single-leg wall sit"], 0, 30, 90),
+        // Round the house: a bed, a chair, the stairs, a towel and a door
+        ladder("beddip", "Bed dips", ["Bent-knee bed dip", "Straight-leg bed dip", "Feet-raised bed dip", "Single-leg bed dip"], 0, NO_EQUIPMENT, 8, 15, 75),
+        ladder("pike", "Pike push-ups", ["Hands-on-bed pike push-up", "Pike push-up", "Feet-on-bed pike push-up"], 0, NO_EQUIPMENT, 5, 12, 90),
+        ladder("towelrow", "Towel rows", ["Door towel row, standing tall", "Door towel row, leaning back", "One-arm door towel row"], 0, NO_EQUIPMENT, 8, 15, 75),
+        ladder("stepup", "Step-ups", ["Step-up onto a stair", "Step-up onto a chair", "Slow step-up onto a chair"], 0, NO_EQUIPMENT, 8, 15, 60),
+        ladder("lunge", "Lunges", ["Reverse lunge", "Forward lunge", "Reverse lunge off a step"], 0, NO_EQUIPMENT, 8, 15, 60),
+        ladder("legcurl", "Hamstring curls", ["Hamstring walkout", "Towel leg curl", "Single-leg towel leg curl", "Nordic lower, feet under the bed"], 0, NO_EQUIPMENT, 6, 12, 75),
+        ladder("deadbug", "Dead bugs", ["Heel-tap dead bug", "Dead bug", "Slow dead bug"], 0, NO_EQUIPMENT, 6, 12, 45),
+        hold("copenhagen", "Copenhagen plank", ["Copenhagen plank, knee on the bed", "Copenhagen plank, foot on the bed"], 0, 10, 30, 45),
         ladder("pull", "Pull-ups", ["Negative pull-up", "Chin-up", "Pull-up", "Archer pull-up"], 0, BAR_OR_TABLE, 3, 8, 120),
         ladder("row", "Table rows", ["Bent-knee table row", "Table row", "Feet-raised table row"], 0, BAR_OR_TABLE, 6, 12, 90),
         ladder("dip", "Dips", ["Chair dip", "Feet-raised chair dip", "Parallel bar dip"], 0, BAR_OR_TABLE, 6, 12, 90),
@@ -47,10 +56,74 @@ const StrengthPlanner = (() => {
     ];
     const GROUPS = [NO_EQUIPMENT, BAR_OR_TABLE, WEIGHTS];
     const byId = (id) => PRESETS.find(p => p.id === id);
+    // Three full-body workouts to take in turn, two or three a week. Each has a
+    // push, a pull, a leg exercise, one for the back of the hips and one for the
+    // core, so two sessions train everything twice. Single-leg work, hamstrings,
+    // calves and the inner thigh are there for running.
+    const PLAN_VERSION = 2;
     const DEFAULT_ROUTINES = [
-        { id: "a", title: "Home A", exercises: ["push", "squat", "plank"].map(byId) },
-        { id: "b", title: "Home B", exercises: ["packrow", "back", "bridge", "sideplank"].map(byId) },
+        { id: "fb-a", title: "Full body A", exercises: ["push", "squat", "packrow", "bridge", "beddip", "plank"].map(byId) },
+        { id: "fb-b", title: "Full body B", exercises: ["pike", "stepup", "towelrow", "legcurl", "calf", "sideplank"].map(byId) },
+        { id: "fb-c", title: "Full body C", exercises: ["beddip", "lunge", "towelrow", "back", "deadbug", "copenhagen"].map(byId) },
     ];
+    // The starter workouts before PLAN_VERSION 2, as exercise ids
+    const OLD_DEFAULTS = { a: "push,squat,plank", b: "packrow,back,bridge,sideplank" };
+
+    // Saved workouts from before this plan: the old starters, if you never changed
+    // them, give way to the new ones; anything of your own stays, with the new ones
+    // added after it. Null if there's nothing to change.
+    function upgradeRoutines(record) {
+        if (!record) return null;
+        if (record.plan >= PLAN_VERSION) return null;
+        const mine = (record.routines || []).filter(r => OLD_DEFAULTS[r.id] !== r.exercises.map(e => e.id).join(","));
+        const extra = DEFAULT_ROUTINES.filter(d => !mine.some(r => r.id === d.id));
+        return { routines: mine.concat(JSON.parse(JSON.stringify(extra))), plan: PLAN_VERSION };
+    }
+
+    // The workout after the one you did last, by title; the first if none match
+    function upNext(routines, sessions) {
+        if (!routines.length) return -1;
+        const last = sessions.filter(s => s.activity === "strength" && s.endTime).sort((a, b) => b.startTime - a.startTime)[0];
+        const i = last ? routines.findIndex(r => r.title === last.title) : -1;
+        return i < 0 ? 0 : (i + 1) % routines.length;
+    }
+
+    // One line on how to do the ones people don't know by name
+    const HOW = {
+        "Bent-knee bed dip": "Hands on the edge of the bed behind you, feet flat, knees bent. Lower until your elbows are at a right angle, then press up.",
+        "Straight-leg bed dip": "As the bent-knee dip, with your legs straight and heels on the floor.",
+        "Feet-raised bed dip": "Hands on the bed, heels on a chair in front of you. Lower to a right angle at the elbows.",
+        "Single-leg bed dip": "A straight-leg bed dip with one foot lifted. Swap legs each set.",
+        "Hands-on-bed pike push-up": "Hands on the bed, hips high so you make an upside-down V. Bend your elbows to bring your head towards the bed.",
+        "Pike push-up": "Hands and feet on the floor, hips high in an upside-down V. Lower your head towards the floor between your hands.",
+        "Feet-on-bed pike push-up": "Feet on the bed, hands on the floor, hips stacked over your shoulders. Lower your head to the floor and press back up.",
+        "Door towel row, standing tall": "Shut the door, loop a towel round both handles and hold an end in each hand. Lean back a little and pull your chest to the door.",
+        "Door towel row, leaning back": "As before, with your feet closer to the door so you lean back further. The more you lean, the harder it gets.",
+        "One-arm door towel row": "Hold both ends of the towel in one hand, lean back and pull. Swap arms each set.",
+        "Step-up onto a stair": "Whole foot on the step. Push through that heel to stand up, then step down slowly. Reps are per leg.",
+        "Step-up onto a chair": "A sturdy chair against a wall. Drive through the top foot rather than pushing off the floor one. Reps are per leg.",
+        "Slow step-up onto a chair": "As before, taking three seconds to lower yourself back down. Reps are per leg.",
+        "Reverse lunge": "Step back and lower your back knee towards the floor, front shin upright. Push through the front heel to come back. Reps are per leg.",
+        "Forward lunge": "Step forward and lower your back knee towards the floor, then push back to standing. Reps are per leg.",
+        "Reverse lunge off a step": "Stand on a stair and step back down off it into a lunge, so you sink lower. Reps are per leg.",
+        "Hamstring walkout": "Lie in a glute bridge, hips up, and walk your heels away in small steps until your legs are nearly straight, then back in.",
+        "Towel leg curl": "On a smooth floor, lie on your back with a towel under your heels. Lift your hips and pull your heels in towards you, then slide them out.",
+        "Single-leg towel leg curl": "The towel leg curl on one leg, the other in the air. Reps are per leg.",
+        "Nordic lower, feet under the bed": "Kneel on something soft with your heels hooked under the bed. Lower your body forward as slowly as you can, catch yourself with your hands, push back up.",
+        "Heel-tap dead bug": "On your back, knees bent above your hips, arms up. Lower one heel to tap the floor while your lower back stays pressed down. Reps are per side.",
+        "Dead bug": "On your back, arms up, knees above your hips. Straighten one leg and lower the opposite arm, back pressed to the floor. Reps are per side.",
+        "Slow dead bug": "The dead bug, taking three seconds each way.",
+        "Copenhagen plank, knee on the bed": "Side plank on your elbow with your top knee on the edge of the bed and the bottom leg tucked under. Hold your hips up. Swap sides each set.",
+        "Copenhagen plank, foot on the bed": "As before with your top leg straight and your foot on the bed: harder. Swap sides each set.",
+        "Two-arm backpack row": "Fill a backpack with books. Hinge forward with a flat back and pull it to your belly.",
+        "Superman raise": "Lie face down, arms forward. Lift your arms, chest and legs a little off the floor, hold a second, lower.",
+        "Reverse snow angel": "Face down, arms by your sides and just off the floor. Sweep them overhead and back, like a snow angel.",
+        "Prone Y raise": "Face down, arms forward in a Y, thumbs up. Lift your arms and chest, squeeze your shoulder blades, lower.",
+        "Shrimp squat": "On one leg, holding the other foot behind you. Lower until your back knee touches the floor.",
+        "Archer push-up": "Hands wide. Lower towards one hand while the other arm stays straight. Alternate sides.",
+        "Long-lever plank": "A plank with your elbows further forward than your shoulders.",
+    };
+    const how = (variation) => HOW[variation] || null;
 
     // For the weekly report: which movement each exercise trains
     const PATTERN_NAMES = { push: "pushing", legs: "legs", hinge: "your back and hips", core: "your core", pull: "pulling" };
@@ -58,8 +131,9 @@ const StrengthPlanner = (() => {
         push: "push", dip: "push", bench: "push", ohp: "push",
         squat: "legs", calf: "legs", barsquat: "legs",
         back: "hinge", bridge: "hinge", deadlift: "hinge",
-        plank: "core", sideplank: "core", hollow: "core", legraise: "core",
-        packrow: "pull", row: "pull", pull: "pull", barrow: "pull", curl: "pull",
+        beddip: "push", pike: "push", stepup: "legs", lunge: "legs", legcurl: "hinge",
+        plank: "core", sideplank: "core", hollow: "core", legraise: "core", deadbug: "core", copenhagen: "core",
+        packrow: "pull", row: "pull", pull: "pull", barrow: "pull", curl: "pull", towelrow: "pull",
     };
     const patternOf = (id) => PATTERNS[id] || "other";
 
@@ -225,7 +299,7 @@ const StrengthPlanner = (() => {
         return (session.exercises || []).filter(e => e.unit === "s").reduce((sum, e) => sum + e.sets.reduce((a, s) => a + s.reps, 0), 0);
     }
 
-    return { PRESETS, GROUPS, DEFAULT_ROUTINES, PATTERN_NAMES, patternOf, custom, target, change, spokenSet, restCues, holdCues, after, oneRepMax, volume, totalReps, totalHeld, progress };
+    return { PRESETS, GROUPS, DEFAULT_ROUTINES, PLAN_VERSION, upgradeRoutines, upNext, how, PATTERN_NAMES, patternOf, custom, target, change, spokenSet, restCues, holdCues, after, oneRepMax, volume, totalReps, totalHeld, progress };
 })();
 
 if (typeof module !== "undefined") module.exports = StrengthPlanner;

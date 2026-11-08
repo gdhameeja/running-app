@@ -230,12 +230,19 @@ const CloudSync = (() => {
         const t = TABLES[table];
         const got = new Map();
         let newest = 0;
+        // Where the last page ended, by time and then id: a cloud-side bulk update
+        // (docs/SUPABASE_STORAGE.md) gives hundreds of rows one updated_at, and
+        // paging by time alone would fetch the same full page forever
+        let after = null;
+        const quote = (v) => `"${String(v).replace(/["\\]/g, "")}"`;
         const page = () => {
             const since = cfg()[watermarkKey];
-            // At or after: rows written together share a time, and a page can end
+            // At or after: rows written together share a time, and a sync can end
             // between them. The ones seen already aren't downloaded again.
-            const filter = since ? `&updated_at=gte.${encodeURIComponent(since)}` : "";
-            return rest(`${table}?select=${t.column},client_updated_at,updated_at${filter}&order=updated_at.asc&limit=${LIST_PAGE}`).then(rows => {
+            const filter = after
+                ? `&or=${encodeURIComponent(`(updated_at.gt.${quote(after.at)},and(updated_at.eq.${quote(after.at)},${t.column}.gt.${quote(after.id)}))`)}`
+                : since ? `&updated_at=gte.${encodeURIComponent(since)}` : "";
+            return rest(`${table}?select=${t.column},client_updated_at,updated_at${filter}&order=updated_at.asc,${t.column}.asc&limit=${LIST_PAGE}`).then(rows => {
                 if (!rows.length) return { got, newest };
                 return t.list().then(local => {
                     const mine = new Map(local.map(r => [String(r[t.key]), stamp(r)]));
@@ -253,7 +260,9 @@ const CloudSync = (() => {
                             })));
                     }
                     return chain.then(() => {
-                        save({ [watermarkKey]: rows[rows.length - 1].updated_at });
+                        const last = rows[rows.length - 1];
+                        save({ [watermarkKey]: last.updated_at });
+                        after = { at: last.updated_at, id: last[t.column] };
                         return rows.length === LIST_PAGE ? page() : { got, newest };
                     });
                 });

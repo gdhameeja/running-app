@@ -182,7 +182,7 @@ function renderPbCards(ghosts) {
             <div class="ghost-distance">${km}K</div>
             ${g.simulated ? '<div class="ghost-sim-badge">Even pace (no splits)</div>' : ""}
             <div class="ghost-pace">${formatPace(g.pace)} /km</div>
-            <div class="ghost-time">${formatPace(g.timeSec)} total</div>
+            <div class="ghost-time">${formatDuration(Math.round(g.timeSec))} total</div>
             <div class="ghost-date">${g.date}</div>
             <button class="ghost-start-btn">Race ghost</button>` : `
             <div class="ghost-card-icon">👻</div>

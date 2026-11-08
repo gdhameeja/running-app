@@ -188,7 +188,12 @@ ghosts, the pace chart, weekly volume) skips records with an `activity`.
   (`unit: "s"` for timed holds, whose `reps` and `target` are seconds).
   `strength-plan.js` suggests each set. It's built for no equipment: most exercises are
   a ladder of harder variations, and hitting the top of the rep range moves you up one.
-  Backpack rows cover pulling without a bar.
+  Backpack rows and towel rows (a towel looped round the handles of a shut door) cover
+  pulling without a bar; bed dips, pike push-ups, step-ups, hamstring curls on a towel
+  and Copenhagen planks use what's in the house. The starter plan is three full-body
+  workouts (A, B, C), each with a push, a pull, legs, back of the hips and core, taken
+  in turn: the picker marks the one after your last as "Up next". Workouts saved before
+  it get the plan added once (`upgradeRoutines`); untouched old starters are replaced.
   Exercises with weights use kilos for rungs. Your workouts sync as the
   `strength-routines` record in the course progress store. `WorkoutService.kt` speaks
   rest timers and holds, so they carry on with the screen locked.

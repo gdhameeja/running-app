@@ -1429,6 +1429,38 @@ function gym(day, weight, target, done, ex = benchEx) {
     assert(SP.totalHeld({ exercises: [{ sets: [{ reps: 10 }] }, { unit: "s", sets: [{ reps: 30 }, { reps: 25 }] }] }) === 55, "Seconds held add up");
     const home = SP.DEFAULT_ROUTINES.flatMap(r => r.exercises.map(e => e.id));
     assert(home.includes("packrow") && !home.includes("pull") && !home.includes("row"), "Pulling with no bar: starter workouts use a backpack");
+    assert(home.includes("beddip"), "Starter workouts have bed dips");
+
+    // The full-body plan
+    const kinds = ["push", "pull", "legs", "hinge", "core"];
+    assert(SP.DEFAULT_ROUTINES.every(r => kinds.every(k => r.exercises.some(e => SP.patternOf(e.id) === k))),
+        "Every starter workout trains pushing, pulling, legs, back of the hips and core");
+    assert(SP.DEFAULT_ROUTINES.every(r => r.exercises.length >= 5 && r.exercises.length <= 7), "Starter workouts are 5 to 7 exercises");
+    assert(SP.PRESETS.filter(p => p.group === "No equipment").every(p => SP.patternOf(p.id) !== "other" || p.id === "burpee" || p.id === "wallsit"),
+        "Home exercises count towards a movement in the weekly report");
+    const newOnes = ["beddip", "pike", "towelrow", "stepup", "lunge", "legcurl", "deadbug", "copenhagen"];
+    assert(newOnes.every(id => SP.PRESETS.find(p => p.id === id).ladder.every(v => SP.how(v))), "Every step of the new exercises says how to do it");
+
+    // Saved workouts from before the plan
+    const oldStarters = { progressId: "strength-routines", routines: [
+        { id: "a", title: "Home A", exercises: ["push", "squat", "plank"].map(id => ({ id })) },
+        { id: "b", title: "Home B", exercises: ["packrow", "back", "bridge", "sideplank"].map(id => ({ id })) },
+    ] };
+    const up1 = SP.upgradeRoutines(oldStarters);
+    assert(up1 && up1.routines.map(r => r.id).join() === "fb-a,fb-b,fb-c" && up1.plan === SP.PLAN_VERSION, "Untouched old starters give way to the full-body plan");
+    const edited = { routines: [{ id: "a", title: "Mine", exercises: ["push", "plank"].map(id => ({ id })) }, { id: "x", title: "Legs", exercises: [{ id: "squat" }] }] };
+    const up2 = SP.upgradeRoutines(edited);
+    assert(up2.routines.map(r => r.id).join() === "a,x,fb-a,fb-b,fb-c", "Workouts you changed or made stay, with the plan added after");
+    assert(SP.upgradeRoutines(Object.assign({}, up2, { plan: SP.PLAN_VERSION })) === null, "Upgraded once only");
+    assert(SP.upgradeRoutines({ routines: up2.routines }).routines.length === 5, "An older phone saving over it doesn't add the plan twice");
+
+    // Up next: the one after the last you did
+    const plan = SP.DEFAULT_ROUTINES;
+    const did = (title, t) => ({ activity: "strength", title, startTime: t, endTime: t + 1 });
+    assert(SP.upNext(plan, []) === 0, "Up next: A to begin with");
+    assert(SP.upNext(plan, [did("Full body A", 1), did("Full body B", 2)]) === 2, "Up next: C after B");
+    assert(SP.upNext(plan, [did("Full body C", 5), did("Full body A", 1)]) === 0, "Up next: back to A after C");
+    assert(SP.upNext(plan, [did("Something else", 9)]) === 0, "Up next: A after a workout not in the list");
 
     // What Stats shows
     const p = SP.progress([Object.assign(on(1, 3, 6, [6, 6, 6]), {}), (() => { const s = on(2, 4, 6, [6, 6, 6]); Object.assign(s.exercises[0], { variation: "Diamond push-up", levels: 6 }); return s; })()]);
@@ -1493,14 +1525,19 @@ function fakeServer({ refuseOlder = false } = {}) {
             });
             return reply(201, null);
         }
-        const all = [...rows.values()].sort((a, b) => a.updated_at < b.updated_at ? -1 : 1);
+        // Ids compare as numbers for runs (bigint) and as text for course progress
+        const idCmp = (a, b) => table === "runs" ? Number(a) - Number(b) : String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+        const all = [...rows.values()].sort((a, b) => a.updated_at < b.updated_at ? -1 : a.updated_at > b.updated_at ? 1 : idCmp(a[col], b[col]));
         const inList = u.searchParams.get(col);
         if (inList) {
             const ids = inList.slice(4, -1).split(",").map(x => x.replace(/"/g, ""));
             return reply(200, all.filter(r => ids.includes(String(r[col]))).map(r => ({ data: r.data })));
         }
+        // or=(updated_at.gt."T",and(updated_at.eq."T",<col>.gt."ID")): after a page ending at (T, ID)
+        const cursor = /^\(updated_at\.gt\."([^"]*)",and\(updated_at\.eq\."[^"]*",\w+\.gt\."([^"]*)"\)\)$/.exec(u.searchParams.get("or") || "");
         const [, op, since] = /^(gte?)\.(.*)$/.exec(u.searchParams.get("updated_at") || "") || [];
-        return reply(200, all.filter(r => !since || (op === "gte" ? r.updated_at >= since : r.updated_at > since))
+        return reply(200, all.filter(r => cursor ? r.updated_at > cursor[1] || (r.updated_at === cursor[1] && idCmp(r[col], cursor[2]) > 0)
+            : !since || (op === "gte" ? r.updated_at >= since : r.updated_at > since))
             .slice(0, Number(u.searchParams.get("limit")) || undefined)
             .map(r => ({ [col]: r[col], client_updated_at: r.client_updated_at, updated_at: r.updated_at })));
     };
@@ -1708,6 +1745,18 @@ async function testSync() {
     await CloudSync.sync();
     const bigGot = await new Promise(r => { Store.database().transaction(["courseProgress"]).objectStore("courseProgress").count().onsuccess = e => r(e.target.result); });
     assert(bigGot === 508, `Sync: a page ending between rows written together loses none of them (${bigGot} of 508)`);
+
+    // One SQL update in the cloud (docs/SUPABASE_STORAGE.md) gives every row the same updated_at
+    const bulkSrv = fakeServer();
+    const bulkAt = new Date(5000).toISOString();
+    for (let i = 0; i < 600; i++) {
+        const id = `q${String(i).padStart(3, "0")}`;
+        bulkSrv.course_progress.set(id, { progress_id: id, data: { progressId: id, updatedAt: 1000 }, client_updated_at: 1000, updated_at: bulkAt });
+    }
+    await phone(bulkSrv);
+    const bulkResult = await Promise.race([CloudSync.sync(), new Promise(r => setTimeout(() => r("hung"), 3000))]);
+    const bulkGot = await new Promise(r => { Store.database().transaction(["courseProgress"]).objectStore("courseProgress").count().onsuccess = e => r(e.target.result); });
+    assert(bulkResult !== "hung" && bulkGot === 600, `Sync: 600 rows sharing one updated_at don't loop forever (${bulkGot} of 600)`);
 
     // A download that stalls halfway must not hang this sync and every one after it
     const stalled = fakeServer();

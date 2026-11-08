@@ -323,6 +323,8 @@ function handleNativeFinished(run) {
     nativeFinishedRunId = run.runId;
     applyNativeSnapshot(run);
     const meta = parseNativeMeta(run);
+    // Finished while the page was gone: attachNativeRun never ran to set this
+    currentActivity = meta.activity || null;
     const guidedDone = run.guided && run.guided.completed && meta.guided
         ? markGuidedSessionComplete(meta.guided.courseId, meta.guided.level, meta.guided.sessionIndex)
         : Promise.resolve();
@@ -340,7 +342,7 @@ function handleNativeFinished(run) {
 // Writes an unfinished snapshot into IndexedDB (endTime stays null).
 function saveNativeSnapshot(run) {
     const time = run.elapsedMs / 1000;
-    return getRunById(run.runId).then(existing => updateRun(Object.assign(existing || { runId: run.runId, startTime: run.startTime }, {
+    return getRunById(run.runId).then(existing => updateRun(Object.assign(existing || { runId: run.runId, startTime: run.startTime, activity: parseNativeMeta(run).activity || undefined }, {
         endTime: null,
         distance: run.distance,
         time: time,
