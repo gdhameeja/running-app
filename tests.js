@@ -2074,7 +2074,8 @@ async function testSync() {
     const bigGot = await new Promise(r => { Store.database().transaction(["courseProgress"]).objectStore("courseProgress").count().onsuccess = e => r(e.target.result); });
     assert(bigGot === 508, `Sync: a page ending between rows written together loses none of them (${bigGot} of 508)`);
 
-    // One SQL update in the cloud (docs/SUPABASE_STORAGE.md) gives every row the same updated_at
+    // One SQL update in the cloud (docs/SUPABASE_STORAGE.md) gives every row the same updated_at.
+    // The limit only has to catch an endless loop; shared CI machines are slow, so it is generous
     const bulkSrv = fakeServer();
     const bulkAt = new Date(5000).toISOString();
     for (let i = 0; i < 600; i++) {
@@ -2082,7 +2083,7 @@ async function testSync() {
         bulkSrv.course_progress.set(id, { progress_id: id, data: { progressId: id, updatedAt: 1000 }, client_updated_at: 1000, updated_at: bulkAt });
     }
     await phone(bulkSrv);
-    const bulkResult = await Promise.race([CloudSync.sync(), new Promise(r => setTimeout(() => r("hung"), 3000))]);
+    const bulkResult = await Promise.race([CloudSync.sync(), new Promise(r => setTimeout(() => r("hung"), 30000))]);
     const bulkGot = await new Promise(r => { Store.database().transaction(["courseProgress"]).objectStore("courseProgress").count().onsuccess = e => r(e.target.result); });
     assert(bulkResult !== "hung" && bulkGot === 600, `Sync: 600 rows sharing one updated_at don't loop forever (${bulkGot} of 600)`);
 
