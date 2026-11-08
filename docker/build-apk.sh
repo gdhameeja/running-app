@@ -35,6 +35,10 @@ docker run --rm -u "$(id -u):$(id -g)" \
     npm ci --no-audit --no-fund
     npm test
     npm run sync
-    cd android && ./gradlew --no-daemon -PversionCode=$VERSION_CODE -PversionName=$VERSION_NAME testDebugUnitTest assembleDebug $*
+    cd android
+    # Gradle itself is downloaded on first use, and that download sometimes fails
+    # (a 504 from GitHub): try a few times before giving up on the build
+    for i in 1 2 3 4; do ./gradlew --no-daemon --version > /dev/null && break; [ \$i = 4 ] && exit 1; echo \"Gradle download failed, trying again in 30 s\"; sleep 30; done
+    ./gradlew --no-daemon -PversionCode=$VERSION_CODE -PversionName=$VERSION_NAME testDebugUnitTest assembleDebug $*
   "
 echo "APK: android/app/build/outputs/apk/debug/app-debug.apk (version $VERSION_NAME)"
