@@ -1,0 +1,12 @@
+// Google's mirror of Maven Central, tried first for build plugins and libraries.
+// Maven Central sometimes redirects build machines to GitHub release downloads
+// (the Kotlin compiler), which time out; the mirror serves the files itself.
+// Used by docker/inside-build.sh; Android Studio builds don't need it.
+def mirror = "https://maven-central.storage-download.googleapis.com/maven2/"
+gradle.beforeProject { project ->
+    [project.buildscript.repositories, project.repositories].each { repos ->
+        def m = repos.maven { name = "MavenCentralMirror"; url = mirror }
+        repos.remove(m)
+        repos.addFirst(m)
+    }
+}
