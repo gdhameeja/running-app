@@ -195,6 +195,12 @@ const Enrich = (() => {
         }).catch(() => null);
     }
 
+    // Ten weeks of sleep and resting heart rate for the weekly report, or null without a watch
+    function dailyHealth(now = Date.now()) {
+        if (!health.granted) return Promise.resolve(null);
+        return NativeTracker.healthDaily(now - 70 * 86400000, now).catch(() => null);
+    }
+
     // ─── Today's weather, for the Tune-In plan ───────────────────────────────
 
     function here() {
@@ -203,7 +209,7 @@ const Enrich = (() => {
             navigator.geolocation.getCurrentPosition(p => resolve([p.coords.latitude, p.coords.longitude]),
                 () => resolve(null), { maximumAge: 30 * 60000, timeout: 8000 });
         }).then(pos => pos || getAllRuns().then(runs => {
-            const last = runs.filter(r => r.endTime).sort((a, b) => b.startTime - a.startTime)[0];
+            const last = runs.filter(r => r.endTime && r.distance > 0).sort((a, b) => b.startTime - a.startTime)[0];
             const p = last && routePoints(last)[0];
             return p ? [p[1], p[2]] : null;
         }));
@@ -246,7 +252,7 @@ const Enrich = (() => {
     }
 
     return {
-        init, pass, afterRun, connectHealth, refreshHealth, refreshReadiness, todayWeather, suggest, routePoints, weather,
+        init, pass, afterRun, connectHealth, dailyHealth, refreshHealth, refreshReadiness, todayWeather, suggest, routePoints, weather,
         healthState: () => health,
         readinessNow: () => readiness && Date.now() - readiness.at < 6 * 3600000
             ? { sleepMin: readiness.sleepMin, restingHr: readiness.restingHr, baseline: readiness.baseline, suggested: readiness.feel } : null,

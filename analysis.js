@@ -9,6 +9,8 @@
 const RunAnalysis = (() => {
     const DEG = Math.PI / 180;
     const EARTH_R = 6371000;
+    // Seconds per km: about the world record for 5K
+    const MIN_PACE = 150;
 
     // ─── Series ──────────────────────────────────────────────────────────────
 
@@ -395,7 +397,9 @@ const RunAnalysis = (() => {
 
     // Predicted 5K pace (s/km) from your recent runs, via Riegel's formula.
     function fiveKPace(runs, beforeTime, windowDays = 120) {
-        const done = runs.filter(r => r.endTime && r.startTime < beforeTime && r.distance >= 1500 && r.time > 0 && !r.activity);
+        // Quicker than 2:30 /km is a car you forgot to stop for, not a run
+        const done = runs.filter(r => r.endTime && r.startTime < beforeTime && r.distance >= 1500 && r.time > 0 && !r.activity &&
+            r.time / (r.distance / 1000) >= MIN_PACE);
         const recent = done.filter(r => r.startTime > beforeTime - windowDays * 86400000);
         const pool = recent.length ? recent : done;
         if (!pool.length) return null;
@@ -644,7 +648,7 @@ const RunAnalysis = (() => {
         sparseSeries, completeSeries, bestEffort, runBestEffort, sliceSeries, kmSplits, findStops, paceSegments, quantile, metres,
         routeSignature, coverage, sameRoute, groupRoutes, rankRoute,
         ghostCue, spokenMetres, CUE_EVERY_M,
-        fiveKPace, vo2max, segmentTarget, guidedReport, parseDuration, formatDistance, trimRun,
+        MIN_PACE, fiveKPace, vo2max, segmentTarget, guidedReport, parseDuration, formatDistance, trimRun,
         minettiFactor, flatMetres, hillFactor, heatSlowdown, wallOffset, hrBetween, cadenceBetween,
     };
 })();

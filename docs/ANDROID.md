@@ -208,3 +208,13 @@ rebuilds the engine, paused from the moment of the last save. The time away
 counts as a pause, no distance is invented for it, and guided runs and ghost
 races pick up where they were. Tap Resume when you're ready. Decline, and you
 get the usual prompt to save or discard what was recorded.
+
+## Weekly report
+
+Every Monday at about 8:00 the app says last week's report is ready; a card on the
+Run tab says the same, and past reports are listed under Stats. It's built when you
+open it, because Health Connect only lets an app read while it's on screen, so the
+notification itself carries no numbers. `weekly-report.js` has the rules and
+`reports/Weekly running performance report.md` the research behind them. The alarm
+is inexact, so Android may deliver it a little late. It's set again on every launch
+and after it fires; after a phone restart it comes back the next time you open the app.

@@ -39,12 +39,14 @@
                 <button id="start-walk"><span class="material-icons">directions_walk</span> <span class="btn-label">Walk</span></button>
                 <button id="open-gym"><span class="material-icons">fitness_center</span> <span class="btn-label">Gym</span></button>
             </div>
+            <div id="home-report"></div>
             <div id="home-recent"></div>
         </div>
 
         <!-- ═══ HISTORY TAB ═══ -->
         <div class="tab-content" id="tab-history">
             <div id="sync-panel"></div>
+            <div id="history-kinds" class="tunein-feel"></div>
             <div id="history-list"></div>
         </div>
 
@@ -124,6 +126,7 @@
                     <p class="vo2max-note">From your predicted 5K: your best recent run of 1.5 km or more</p>
                 </div>
 
+                <div id="week-reports"></div>
                 <div id="strength-stats"></div>
                 <div id="walk-stats"></div>
 
@@ -257,6 +260,7 @@
         </div>
     </div>
     <div id="gym-screen" style="display:none;"></div>
+    <div id="report-screen" style="display:none;"></div>
     <div id="toast" style="display:none;"></div>
 
     <script src="coach.js"></script>
@@ -273,6 +277,8 @@
     <script src="performance.js"></script>
     <script src="ghost-race.js"></script>
     <script src="strength.js"></script>
+    <script src="weekly-report.js"></script>
+    <script src="weekly-report-ui.js"></script>
     <script src="run-detail.js"></script>
     <script src="ar-math.js"></script>
     <script src="ar-ghost.js"></script>

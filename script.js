@@ -49,6 +49,8 @@ let coachLog = [];
 let coachResults = null;
 // Set just before Start to make this a "walk": same tracking, kept out of your running numbers
 let nextActivity = null;
+// What the one in progress is: null for a run
+let currentActivity = null;
 
 // ─── Course Progress DB ────────────────────────────────────────────────────────
 
@@ -153,11 +155,16 @@ document.addEventListener("DOMContentLoaded", () => {
             checkForInterruptedRun();
             migrateRouteNames().catch(err => console.warn("Route names not moved:", err));
             if (!isRunLive()) Gym.init();
+            WeekReport.init();
             renderHomeRecent();
             renderFeelPicker();
             updateHomeGpsWatch();
         })
-        .catch(error => console.error("Failed to initialize database:", error));
+        .catch(error => {
+            console.error("Failed to initialize database:", error);
+            // Otherwise this looks like a phone with no runs on it
+            if (!db) alert("Couldn't open your run history. Nothing has been deleted. Close the app and open it again.");
+        });
 });
 
 function initMap() {
@@ -209,6 +216,7 @@ function initTabs() {
                 setTimeout(() => map.invalidateSize(), 100);
                 renderHomeRecent();
                 renderFeelPicker();
+                WeekReport.renderCards();
             }
             updateHomeGpsWatch();
         });
@@ -222,10 +230,19 @@ function showTab(name) {
 
 // ─── Run Tracking (start/pause/stop) ──────────────────────────────────────────
 
+// A workout's voice and a run's would talk over each other
+function workoutInTheWay() {
+    if (!Gym.active()) return false;
+    alert("Finish your workout first. The Gym button takes you back to it.");
+    return true;
+}
+
 document.getElementById("start").addEventListener("click", () => {
-    document.getElementById("start").disabled = true;
     const activity = nextActivity;
     nextActivity = null;
+    if (workoutInTheWay()) return;
+    document.getElementById("start").disabled = true;
+    currentActivity = activity;
     if (window.speechSynthesis) speechSynthesis.cancel();
     totalDistance = 0;
     estimatedDistance = 0;
@@ -379,10 +396,10 @@ function stopRun() {
     });
     ["pointerup", "pointerleave", "pointercancel"].forEach(ev => btn.addEventListener(ev, cancel));
     btn.addEventListener("contextmenu", e => e.preventDefault());
-    btn.addEventListener("click", () => { if (!timer) showToast("Hold the button to finish your run.", 2500); });
+    btn.addEventListener("click", () => { if (!timer) showToast("Hold the button to finish.", 2500); });
 })();
 
-// Resets the run UI and saves the finished run. Returns a promise.
+// Resets the run UI and saves the finished run. Resolves with false if it couldn't be saved.
 function endRun(endTime) {
     clearInterval(timerInterval);
     gpsWatch = null;
@@ -435,13 +452,19 @@ function endRun(endTime) {
             runData.pathSegments = [...pathSegments, currentSegment];
             runData.estimatedDistance = estimatedDistance;
             Object.assign(runData, extraRunData());
-            return updateRun(runData).then(() => {
-                displayRunSummary(runData);
-                CloudSync.soon();
-                Enrich.afterRun();
-            });
+            return updateRun(runData).then(() => runData);
         })
-        .catch(error => console.error("Error updating run:", error));
+        .then(runData => {
+            displayRunSummary(runData);
+            CloudSync.soon();
+            Enrich.afterRun();
+        }, error => {
+            console.error("Error updating run:", error);
+            alert(`Couldn't save this run: ${error && error.message || error}. It will be offered again next time you open the app.`);
+            closeRunScreen();
+            return false;
+        })
+        .catch(error => console.error("Error showing run:", error));
 }
 
 // The last Tune-In part counts too, even if you stopped early (web runs; the service does its own)
@@ -550,7 +573,7 @@ function checkForInterruptedRun() {
         if (!found) return;
         const dist = (found.distance / 1000).toFixed(2);
         const time = formatTime(Math.floor(found.time || 0));
-        if (!confirm(`Found an interrupted run (${dist} km, ${time}). Save it?`)) return forgetRun(found.runId);
+        if (!confirm(`Found an interrupted ${found.activity === "walk" ? "walk" : "run"} (${dist} km, ${time}). Save it?`)) return forgetRun(found.runId);
         return getRunById(found.runId).then(run => {
             run.endTime = run.startTime + RunAnalysis.wallOffset(run, (run.time || 0) * 1000);
             if (run.distance > 0 && run.time > 0) run.pace = run.time / (run.distance / 1000);
@@ -897,6 +920,7 @@ function startGhostRaceMode(spec) {
         alert("Stop your current run before starting a ghost race.");
         return;
     }
+    if (workoutInTheWay()) return;
     buildGhost(spec).then(ghost => {
         ghostRace = {
             spec,
@@ -1000,7 +1024,9 @@ function updateGhostPanel() {
 // ─── Run history ─────────────────────────────────────────────────────────────
 
 const HISTORY_PAGE = 20;
+const HISTORY_KINDS = { all: "All", run: "Runs", walk: "Walks", strength: "Gym" };
 let historyShown = HISTORY_PAGE;
+let historyKind = "all";
 
 function formatRunDate(t) {
     const d = new Date(t);
@@ -1052,7 +1078,9 @@ function renderHistory() {
     const el = document.getElementById("history-list");
     loadAllRuns().then(all => {
         // The run in progress lives in the run bar, not here
-        const runs = all.filter(r => !(isRunLive() && r.runId === currentRunId));
+        const everything = all.filter(r => !(isRunLive() && r.runId === currentRunId));
+        renderHistoryKinds(everything);
+        const runs = historyKind === "all" ? everything : everything.filter(r => (r.activity || "run") === historyKind);
         if (!runs.length) {
             el.innerHTML = '<p class="empty-note">No runs yet. Your runs will show up here.</p>';
             return;
@@ -1065,13 +1093,35 @@ function renderHistory() {
     });
 }
 
-// The last few runs under the Start button
+// All / Runs / Walks / Gym, once there's more than one kind to choose from
+function renderHistoryKinds(runs) {
+    const el = document.getElementById("history-kinds");
+    const kinds = new Set(runs.map(r => r.activity || "run"));
+    if (!kinds.has(historyKind)) historyKind = "all";
+    el.innerHTML = kinds.size < 2 ? "" : Object.keys(HISTORY_KINDS).filter(k => k === "all" || kinds.has(k))
+        .map(k => `<button class="feel-btn${k === historyKind ? " active" : ""}" data-kind="${k}">${HISTORY_KINDS[k]}</button>`).join("");
+    el.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+        historyKind = b.dataset.kind;
+        historyShown = HISTORY_PAGE;
+        renderHistory();
+    }));
+}
+
+// The week so far and the last few sessions, under the Start button
 function renderHomeRecent() {
     const el = document.getElementById("home-recent");
     loadAllRuns().then(runs => {
         const done = runs.filter(r => r.endTime).slice(0, 3);
         if (!done.length) { el.innerHTML = ""; return; }
-        el.innerHTML = `<div class="section-head"><h3>Recent runs</h3><button class="link-btn" id="home-all">See all</button></div>` +
+        const week = weekSoFar(runs);
+        const count = (n, one) => `<b>${n}</b> ${one}${n === 1 ? "" : "s"}`;
+        const parts = [
+            week.runs && `<b>${week.runKm.toFixed(1)}</b> km run`,
+            week.walks && `<b>${week.walkKm.toFixed(1)}</b> km walked`,
+            week.workouts && count(week.workouts, "workout"),
+        ].filter(Boolean);
+        el.innerHTML = (parts.length ? `<p class="home-week">This week: ${parts.join(" · ")}</p>` : "") +
+            `<div class="section-head"><h3>Recent</h3><button class="link-btn" id="home-all">See all</button></div>` +
             done.map(runCardHtml).join("");
         bindRunCards(el);
         document.getElementById("home-all").addEventListener("click", () => showTab("history"));
@@ -1151,7 +1201,7 @@ function renderRunBar() {
     bar.style.display = show ? "flex" : "none";
     if (show) {
         document.getElementById("run-bar-text").textContent =
-            `${isPaused ? "Paused" : "Running"} · ${(totalDistance / 1000).toFixed(2)} km · ${document.getElementById("time").textContent}`;
+            `${isPaused ? "Paused" : currentActivity === "walk" ? "Walking" : "Running"} · ${(totalDistance / 1000).toFixed(2)} km · ${document.getElementById("time").textContent}`;
     }
 }
 
@@ -1164,7 +1214,7 @@ function renderPauseButton(paused) {
 }
 
 document.getElementById("start-walk").addEventListener("click", () => {
-    if (isRunLive()) return;
+    if (isRunLive() || workoutInTheWay()) return;
     nextActivity = "walk";
     document.getElementById("start").click();
 });
@@ -1187,7 +1237,8 @@ window.addEventListener("popstate", () => {
 let homeGpsWatch = null;
 
 function updateHomeGpsWatch() {
-    const want = !isRunLive() && !document.hidden &&
+    // Not behind the gym screen: a workout keeps the screen on, and GPS is costly
+    const want = !isRunLive() && !document.hidden && !Gym.isOpen() &&
         document.getElementById("tab-track").classList.contains("active") && !isRunScreenOpen();
     if (want && homeGpsWatch == null && navigator.geolocation) {
         const el = document.getElementById("home-gps");
@@ -1344,6 +1395,8 @@ function openCourseDetail(courseId, level = "beginner") {
     const course = COURSES.find(c => c.id === courseId);
     if (!course) return;
 
+    // Android's Back button walks the page's history
+    try { if (!(history.state && history.state.courseDetail)) history.pushState({ courseDetail: true }, ""); } catch (e) { /* not allowed here */ }
     document.getElementById("course-grid").style.display = "none";
     document.getElementById("active-course-banner").style.display = "none";
     document.getElementById("tunein-card").style.display = "none";
@@ -1526,12 +1579,22 @@ function markSessionComplete(sessionIndex) {
     });
 }
 
-document.getElementById("back-to-courses").addEventListener("click", () => {
+function closeCourseDetail() {
     document.getElementById("course-detail").style.display = "none";
     document.getElementById("course-grid").style.display = "grid";
     refreshActiveBanner();
     document.getElementById("tunein-card").style.display = "";
     renderTuneInCard();
+}
+
+document.getElementById("back-to-courses").addEventListener("click", () => {
+    if (history.state && history.state.courseDetail) history.back();
+    else closeCourseDetail();
+});
+
+window.addEventListener("popstate", () => {
+    // Only at the bottom of the history: other screens stack on top of this one
+    if (!history.state && document.getElementById("course-detail").style.display === "block") closeCourseDetail();
 });
 
 document.querySelectorAll(".level-btn").forEach(btn => {
@@ -1671,6 +1734,7 @@ function startGuidedSession(sess, courseId, levelKey, sessionIndex) {
         alert("Stop your current run before starting a guided run.");
         return;
     }
+    if (workoutInTheWay()) return;
 
     guidedRun = {
         courseId, level: levelKey, sessionIndex, session: sess,

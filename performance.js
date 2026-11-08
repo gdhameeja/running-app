@@ -32,6 +32,18 @@ function calcWeeklyVolume(runs, weeks = 8, now = Date.now()) {
     return buckets;
 }
 
+// Since Monday, everything counted: { runs, runKm, walks, walkKm, workouts }
+function weekSoFar(runs, now = Date.now()) {
+    const monday = new Date(now);
+    monday.setHours(0, 0, 0, 0);
+    monday.setDate(monday.getDate() - (monday.getDay() + 6) % 7);
+    const week = runs.filter(r => r.endTime && r.startTime >= monday.getTime());
+    const kind = (activity) => week.filter(r => r.activity === activity);
+    const km = (list) => list.reduce((sum, r) => sum + r.distance / 1000, 0);
+    const running = week.filter(r => !r.activity);
+    return { runs: running.length, runKm: km(running), walks: kind("walk").length, walkKm: km(kind("walk")), workouts: kind("strength").length };
+}
+
 // For each distance (km), the fastest stretch of that length inside any run:
 // { run, startM, timeMs, even? }, or null if no run is that long.
 function findBestEfforts(runs, distancesKm) {
@@ -40,7 +52,9 @@ function findBestEfforts(runs, distancesKm) {
         let best = null;
         runs.filter(r => !r.activity).forEach(r => {
             const e = RunAnalysis.runBestEffort(r, km * 1000);
-            if (e && (!best || e.timeMs < best.timeMs)) best = Object.assign({ run: r }, e);
+            // A stretch in a car you forgot to stop for isn't a PB
+            if (!e || e.timeMs / 1000 / km < RunAnalysis.MIN_PACE) return;
+            if (!best || e.timeMs < best.timeMs) best = Object.assign({ run: r }, e);
         });
         bests[km] = best;
     });
@@ -91,6 +105,7 @@ function renderStats() {
         renderVO2max(runs);
         document.getElementById("strength-stats").innerHTML = strengthStatsHtml(runs);
         document.getElementById("walk-stats").innerHTML = walkStatsHtml(runs);
+        WeekReport.renderList();
         renderCourseProgress();
     });
 }
@@ -252,5 +267,5 @@ function renderCourseProgress() {
 }
 
 if (typeof module !== "undefined") {
-    module.exports = { calcPaceTrend, calcWeeklyVolume, findBestEfforts, calcPersonalBests, formatPace, getGhostDistanceAtTime, getGhostTimeAtDistance, getGhostPositionAtTime };
+    module.exports = { calcPaceTrend, calcWeeklyVolume, weekSoFar, findBestEfforts, calcPersonalBests, formatPace, getGhostDistanceAtTime, getGhostTimeAtDistance, getGhostPositionAtTime };
 }

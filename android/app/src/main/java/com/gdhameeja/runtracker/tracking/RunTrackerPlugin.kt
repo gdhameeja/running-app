@@ -238,6 +238,21 @@ class RunTrackerPlugin : Plugin() {
         }
     }
 
+    // ─── The Monday notification (weekly-report-ui.js) ───────────────────────
+
+    @PluginMethod
+    fun reportReminder(call: PluginCall) {
+        val at = call.getLong("at") ?: return call.reject("Missing at")
+        WeeklyReportReceiver.schedule(context, at)
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun reportReminderOff(call: PluginCall) {
+        WeeklyReportReceiver.cancel(context)
+        call.resolve()
+    }
+
     // ─── Health Connect (watch heart rate, sleep, resting HR; enrich.js) ─────
 
     private val health by lazy { HealthBridge(context) }

@@ -43,6 +43,9 @@ const NativeTracker = (() => {
         workoutStart: (title) => call("workoutStart", { title }),
         workoutCues: (cues, label) => call("workoutCues", { cues, label }),
         workoutStop: () => call("workoutStop"),
+        // The Monday notification (weekly-report-ui.js)
+        reportReminder: (at) => call("reportReminder", { at }),
+        reportReminderOff: () => call("reportReminderOff"),
         // AR ghost view (ar-ghost.js)
         startOrientation: () => call("startOrientation"),
         stopOrientation: () => call("stopOrientation"),
@@ -60,6 +63,7 @@ const CONTINUE_WITHIN_MS = 12 * 3600000;
 
 function startNativeRun() {
     const meta = {
+        activity: currentActivity,
         // Meta is in every snapshot the service writes to disk, so it carries the 100 m
         // splits only; attachNativeRun reloads the full track from IndexedDB.
         ghostRace: ghostRace ? Object.assign({}, ghostRace, { ghostTimeSeries: ghostRace.ghostSplits, ghostSplits: undefined, cue: undefined }) : null,
@@ -136,6 +140,7 @@ function attachNativeRun(run) {
     nativeRun = true;
     currentRunId = run.runId;
     const meta = parseNativeMeta(run);
+    currentActivity = meta.activity || null;
     if (meta.ghostRace) {
         ghostRace = meta.ghostRace;
         // Runs started before ghost specs existed carried targetKm
@@ -170,6 +175,10 @@ function attachNativeRun(run) {
     openRunScreen();
     applyNativeSnapshot(run);
     redrawPath();
+    // The timer writes these, but it doesn't tick for a run that comes back paused
+    const elapsed = run.elapsedMs / 1000;
+    document.getElementById("time").textContent = formatDuration(elapsed);
+    if (totalDistance > 0) document.getElementById("pace").textContent = formatPace(elapsed / (totalDistance / 1000));
     updateTimer();
     startAutoSave();
     if (run.status === "paused") setPausedUI(true);
@@ -322,7 +331,10 @@ function handleNativeFinished(run) {
         startTime = run.endTime - run.elapsedMs;
         nativeRun = false;
         return endRun(run.endTime);
-    }).then(() => NativeTracker.clear());
+    }).then(saved => {
+        // Not saved: the service's copy is all there is, for the next launch to try again
+        if (saved !== false) return NativeTracker.clear();
+    });
 }
 
 // Writes an unfinished snapshot into IndexedDB (endTime stays null).

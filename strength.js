@@ -17,6 +17,7 @@ const Gym = (() => {
     let webTimers = [];
 
     const screen = () => document.getElementById("gym-screen");
+    const shown = () => screen().style.display !== "none";
     const copy = (x) => JSON.parse(JSON.stringify(x));
 
     // ─── Stored things ───────────────────────────────────────────────────────
@@ -116,7 +117,8 @@ const Gym = (() => {
         const next = following();
         item.done.push({ weight, reps, target: item.target.reps });
         session.holdEndsAt = null;
-        if (!next) return finish();
+        session.lastSetAt = from;
+        if (!next) return finish({ end: from });
         if (next !== item) session.at++;
         const rest = item.ex.restSec;
         session.restEndsAt = from + rest * 1000;
@@ -131,16 +133,28 @@ const Gym = (() => {
     }
 
     // The voice takes it from here: through the hold and on into the rest
-    function startHold() {
+    function holdVoice(seconds) {
         const item = current();
-        const seconds = item.target.reps;
         const next = following();
-        session.holdEndsAt = Date.now() + seconds * 1000;
-        saveDraft();
         const cues = StrengthPlanner.holdCues(seconds, label(item));
         const rest = next ? StrengthPlanner.after(restFor(item.ex.restSec, next), seconds * 1000) : [];
         say(cues.concat(rest), label(item));
+    }
+
+    function startHold() {
+        const seconds = current().target.reps;
+        session.holdEndsAt = Date.now() + seconds * 1000;
+        saveDraft();
+        holdVoice(seconds);
         render();
+    }
+
+    // After the app was closed: whatever was going to be said went with it
+    function resumeVoice() {
+        const left = (ends) => Math.max(1, Math.round((ends - Date.now()) / 1000));
+        if (session.holdEndsAt) holdVoice(left(session.holdEndsAt));
+        else if (session.restEndsAt) say(restFor(left(session.restEndsAt), current()).slice(1), `Next: ${label(current())}`);
+        else say([{ inMs: 0, text: intro(current()) }], label(current()));
     }
 
     function stopHold() {
@@ -203,33 +217,35 @@ const Gym = (() => {
         render();
     }
 
-    function finish() {
+    // `end` and `silent` are for a workout the app lost, ended on the next launch
+    function finish({ end = Date.now(), silent = false } = {}) {
         const s = session;
         const exercises = s.items.filter(i => i.done.length).map(i => ({
             id: i.ex.id, name: i.ex.name, variation: i.target.variation || undefined, level: i.ex.ladder ? i.target.level : undefined,
             levels: i.ex.ladder ? i.ex.ladder.length : undefined, unit: i.target.unit, sets: i.done,
         }));
         session = null;
-        saveDraft();
         clearInterval(ticker);
         releaseWakeLock();
-        if (!exercises.length) { stopVoice(); close(); return Promise.resolve(); }
-        const end = Date.now();
-        speakFinal();
-        return saveRun({
+        stopVoice();
+        if (!exercises.length) { saveDraft(); close(); return Promise.resolve(); }
+        if (!silent) speakText("Workout done. Good work.");
+        // The draft goes only once this is safely stored. Put, not add: the app may
+        // have died between the two last time.
+        return updateRun({
             runId: s.startTime, activity: "strength", title: s.title, startTime: s.startTime, endTime: end,
             distance: 0, time: (end - s.startTime) / 1000, pace: 0, timeSeries: [], exercises,
             feel: todayFeel().feel || undefined,
         }).then(() => {
+            saveDraft();
             CloudSync.soon();
             renderHomeRecent();
-            return openPicker();
-        }).then(() => showToast("Workout saved.", 2500));
-    }
-
-    function speakFinal() {
-        stopVoice();
-        speakText("Workout done. Good work.");
+            renderButton();
+            return shown() ? openPicker() : null;
+        }).then(() => showToast("Workout saved.", 2500), err => {
+            alert(`Couldn't save your workout: ${err && err.message || err}. It will be offered again next time you open the app.`);
+            if (shown()) close();
+        });
     }
 
     // ─── Screens ─────────────────────────────────────────────────────────────
@@ -255,14 +271,20 @@ const Gym = (() => {
         </div>`;
     }
 
+    function tweakHtml(i, field, text) {
+        const button = (by, sign, word) => `<button class="gym-tweak" data-i="${i}" data-field="${field}" data-by="${by}" aria-label="${word} ${field === "sets" ? "sets" : "rest"}">${sign}</button>`;
+        return `<span class="gym-stepper">${button(-1, "−", "Fewer")}<b>${text}</b>${button(1, "+", "More")}</span>`;
+    }
+
     function editorHtml() {
         const r = routines[editing];
         const unused = StrengthPlanner.PRESETS.filter(p => !r.exercises.some(e => e.id === p.id));
         return `<div class="gym-list"><div class="gym-card">
             <label class="gym-field">Name <input id="gym-title" value="${escapeHtml(r.title)}" maxlength="30"></label>
             <ul class="gym-plan gym-editing">${r.exercises.map((ex, i) => `<li><span>${escapeHtml(ex.name)}</span>
-                <small>${ex.sets} sets · ${ex.repLow}–${ex.repHigh} ${ex.unit === "s" ? "seconds" : "reps"} · ${ex.restSec} s rest</small>
-                <button class="btn-small gym-remove" data-i="${i}" aria-label="Remove ${escapeHtml(ex.name)}"><span class="material-icons">close</span></button></li>`).join("")}</ul>
+                <small>${ex.repLow}–${ex.repHigh} ${ex.unit === "s" ? "seconds" : "reps"} a set</small>
+                <button class="btn-small gym-remove" data-i="${i}" aria-label="Remove ${escapeHtml(ex.name)}"><span class="material-icons">close</span></button>
+                <div class="gym-tweaks">${tweakHtml(i, "sets", `${ex.sets} sets`)}${tweakHtml(i, "restSec", `${ex.restSec} s rest`)}</div></li>`).join("")}</ul>
             <label class="gym-field">Add an exercise
                 <select id="gym-preset"><option value="">Choose…</option>${StrengthPlanner.GROUPS.map(g => {
                     const inGroup = unused.filter(p => p.group === g);
@@ -319,13 +341,14 @@ const Gym = (() => {
             <div class="gym-progress">Rest</div>
             <div class="gym-clock" id="gym-clock"></div>
             <p class="gym-why">Next: <b>${escapeHtml(label(item))}</b>, ${what}</p>
-            <div class="sp-row"><button class="btn-small" id="gym-rest-more">+30 s</button><button class="btn-small" id="gym-rest-skip">Skip rest</button></div>
+            <div class="sp-row"><button class="btn-small" id="gym-rest-more">+30 s</button><button class="btn-small" id="gym-rest-skip">Skip rest</button><button class="btn-small" id="gym-finish">Finish workout</button></div>
         </div>`;
     }
 
     function updateClock() {
         if (!session) return;
-        if (settle()) { render(); return; }
+        // Not over whatever you're looking at, if you left the gym screen
+        if (settle()) { if (shown()) render(); return; }
         const ends = session.holdEndsAt || session.restEndsAt;
         const el = document.getElementById("gym-clock");
         if (ends && el) el.textContent = formatTime(Math.ceil((ends - Date.now()) / 1000));
@@ -333,6 +356,8 @@ const Gym = (() => {
 
     function render() {
         const el = screen();
+        el.style.display = "flex";
+        updateHomeGpsWatch();
         settle();
         const title = session ? session.title : editing != null ? "Edit workout" : "Gym";
         const body = session ? (session.holdEndsAt ? holdHtml() : session.restEndsAt ? restHtml() : setHtml()) : editing != null ? editorHtml() : pickerHtml();
@@ -340,7 +365,6 @@ const Gym = (() => {
                 <button class="rd-back" id="gym-back" aria-label="Back"><span class="material-icons">arrow_back</span></button>
                 <div class="rd-title">${escapeHtml(title)}</div>
             </div><div class="rd-body">${body}</div>`;
-        el.style.display = "flex";
         clearInterval(ticker);
         if (session && (session.restEndsAt || session.holdEndsAt)) {
             ticker = setInterval(updateClock, 250);
@@ -352,7 +376,7 @@ const Gym = (() => {
     function bind(el) {
         const on = (id, fn) => { const b = el.querySelector("#" + id); if (b) b.addEventListener("click", fn); };
         on("gym-back", () => {
-            if (editing != null) { editing = null; return saveRoutines().then(render); }
+            if (editing != null) return leaveEditor();
             close(); // a workout in progress keeps going; the Gym button reopens it
         });
         el.querySelectorAll(".gym-start").forEach(b => b.addEventListener("click", () => start(routines[Number(b.dataset.i)])));
@@ -364,7 +388,14 @@ const Gym = (() => {
         });
         el.querySelectorAll(".gym-remove").forEach(b => b.addEventListener("click", () => {
             routines[editing].exercises.splice(Number(b.dataset.i), 1);
-            render();
+            renderInPlace();
+        }));
+        el.querySelectorAll(".gym-tweak").forEach(b => b.addEventListener("click", () => {
+            const ex = routines[editing].exercises[Number(b.dataset.i)];
+            const by = Number(b.dataset.by);
+            if (b.dataset.field === "sets") ex.sets = Math.min(8, Math.max(1, ex.sets + by));
+            else ex.restSec = Math.min(300, Math.max(15, ex.restSec + by * 15));
+            renderInPlace();
         }));
         const title = el.querySelector("#gym-title");
         if (title) title.addEventListener("input", () => { routines[editing].title = title.value.trim() || "Workout"; });
@@ -380,7 +411,7 @@ const Gym = (() => {
             if (ex) routines[editing].exercises.push(copy(ex));
             render();
         });
-        on("gym-edit-done", () => { editing = null; saveRoutines().then(render); });
+        on("gym-edit-done", leaveEditor);
         on("gym-delete-routine", () => {
             if (!confirm("Delete this workout? Your past sessions stay.")) return;
             routines.splice(editing, 1);
@@ -408,10 +439,29 @@ const Gym = (() => {
         on("gym-rest-skip", skipRest);
     }
 
+    function leaveEditor() {
+        editing = null;
+        return saveRoutines().then(render);
+    }
+
+    // Back to where you were in a long list
+    function renderInPlace() {
+        const y = screen().querySelector(".rd-body").scrollTop;
+        render();
+        screen().querySelector(".rd-body").scrollTop = y;
+    }
+
+    // Android's Back button walks the page's history, so the screen needs an entry
+    function pushScreen() {
+        try { if (!(history.state && history.state.gym)) history.pushState({ gym: true }, ""); } catch (e) { /* not allowed here */ }
+    }
+
     function openPicker() {
-        return Promise.all([routines ? routines : loadRoutines(), getAllRuns()]).then(([r, runs]) => {
+        // From the store each time: another phone may have changed them through sync
+        return Promise.all([editing != null ? routines : loadRoutines(), getAllRuns()]).then(([r, runs]) => {
             routines = r;
             past = runs.filter(x => x.activity === "strength");
+            pushScreen();
             render();
         });
     }
@@ -421,9 +471,11 @@ const Gym = (() => {
         return openPicker();
     }
 
-    function close() {
+    function close(fromHistory) {
         clearInterval(ticker);
         screen().style.display = "none";
+        if (!fromHistory && history.state && history.state.gym) history.back();
+        updateHomeGpsWatch();
         renderHomeRecent();
         renderButton();
     }
@@ -439,11 +491,17 @@ const Gym = (() => {
         if (!draft || !draft.items) return;
         session = draft;
         const did = draft.items.reduce((n, i) => n + i.done.length, 0);
-        if (confirm(`You have an unfinished workout (${did} sets done). Carry on with it?`)) {
-            if (NativeTracker.available) NativeTracker.workoutStart(draft.title).catch(() => {});
+        if (confirm(`You have an unfinished workout (${did} set${did === 1 ? "" : "s"} done). Carry on with it?`)) {
+            settle(); // its last hold may have ended while the app was gone, finishing it
+            if (session) {
+                if (NativeTracker.available) NativeTracker.workoutStart(draft.title).catch(() => {});
+                requestWakeLock();
+                resumeVoice();
+            }
             openPicker();
         } else {
-            finish();
+            // It ended with its last set, not now, which could be days later
+            finish({ end: draft.lastSetAt || Date.now(), silent: true });
         }
         renderButton();
     }
@@ -452,7 +510,14 @@ const Gym = (() => {
         if (!document.hidden && session) { requestWakeLock(); updateClock(); }
     });
 
-    return { open, init };
+    window.addEventListener("popstate", () => {
+        if (!shown() || (history.state && history.state.gym)) return;
+        if (editing == null) return close(true);
+        pushScreen(); // Back leaves the editor, not the gym
+        leaveEditor();
+    });
+
+    return { open, init, active: () => !!session, isOpen: shown };
 })();
 
 // Every set of a session, for its details page

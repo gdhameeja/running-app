@@ -29,7 +29,7 @@ function assertApprox(actual, expected, tolerance, name) {
 
 global.RunAnalysis = require("./analysis.js");
 const { getDistance, classifyFix, formatTime, formatDuration } = require("./run-core.js");
-const { calcPaceTrend, formatPace, getGhostDistanceAtTime, getGhostTimeAtDistance, getGhostPositionAtTime } = require("./performance.js");
+const { calcPaceTrend, weekSoFar, formatPace, getGhostDistanceAtTime, getGhostTimeAtDistance, getGhostPositionAtTime } = require("./performance.js");
 
 // ─── Pace Calculation Tests ──────────────────────────────────────────────────
 
@@ -1063,6 +1063,215 @@ function RA_TRIM(run, ms) { return RunAnalysis.trimRun(run, ms); }
     assert(w.fix(421000) === null, "GPS: a normal fix says nothing");
 })();
 
+(function testCarIsNotAPb() {
+    const { findBestEfforts } = require("./performance.js");
+    const car = { startTime: 2, endTime: 3, distance: 6000, time: 600, pace: 100 };
+    const real = { startTime: 1, endTime: 2, distance: 5000, time: 1500, pace: 300 };
+    assert(findBestEfforts([car, real], [5])[5].run === real, "A car you forgot to stop for doesn't set a PB");
+    assert(Math.abs(RunAnalysis.fiveKPace([car, real], 10) - 300) < 1, "Nor does it set your predicted 5K");
+})();
+
+(function testWeekSoFar() {
+    const now = new Date(2026, 10, 11, 12).getTime(); // a Wednesday
+    const at = (d, h = 9) => new Date(2026, 10, d, h).getTime();
+    const w = weekSoFar([
+        { startTime: at(9), endTime: at(9) + 1, distance: 5000 },
+        { startTime: at(11), endTime: null, distance: 900 },
+        { startTime: at(8, 23), endTime: at(9), distance: 9000 },
+        { startTime: at(10), endTime: at(10) + 1, distance: 2000, activity: "walk" },
+        { startTime: at(10), endTime: at(10) + 1, distance: 0, activity: "strength" },
+    ], now);
+    assert(w.runs === 1 && w.runKm === 5 && w.walks === 1 && w.walkKm === 2 && w.workouts === 1, "This week: from Monday, finished only, each kind counted apart");
+})();
+
+(function testBuildListsEveryScript() {
+    const fs = require("fs");
+    const list = fs.readFileSync("scripts/build-web.js", "utf8");
+    const scripts = [...fs.readFileSync("index.html", "utf8").matchAll(/<script src="([^"]+)"/g)].map(m => m[1]).filter(f => !f.startsWith("vendor/"));
+    assert(scripts.length > 10 && scripts.every(f => list.includes(`"${f}"`)), "Every script the page loads goes into the APK");
+})();
+
+// ─── Weekly report ───────────────────────────────────────────────────────────
+
+global.StrengthPlanner = require("./strength-plan.js");
+const WR = require("./weekly-report.js");
+
+function seeded(seed) { return () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296; }
+
+(function testWeeklyReport() {
+    console.log("\n=== Weekly Report Tests ===\n");
+    const start = new Date(2026, 10, 2).getTime(); // a Monday
+    const at = (week, day, hour = 8) => { const d = new Date(start); d.setDate(d.getDate() + week * 7 + day); d.setHours(hour); return d.getTime(); };
+    const run = (t, km = 5, pace = 330, extra = {}) => Object.assign({ runId: t, startTime: t, endTime: t + km * pace * 1000, distance: km * 1000, time: km * pace, pace, timeSeries: [] }, extra);
+    const walk = (t, min = 30, extra = {}) => Object.assign({ runId: t, activity: "walk", startTime: t, endTime: t + min * 60000, distance: min * 80, time: min * 60, pace: 750 }, extra);
+    const gym = (t, ex = [{ id: "push", name: "Push-ups", variation: "Push-up", level: 3, levels: 6, sets: [{ reps: 8, target: 8 }] }]) =>
+        ({ runId: t, activity: "strength", startTime: t, endTime: t + 1800000, distance: 0, time: 1800, exercises: ex });
+    const usualWeeks = (from, to, rpe = 3) => {
+        const out = [];
+        for (let w = from; w <= to; w++) out.push(run(at(w, 0), 5, 330, { rpe }), run(at(w, 2), 5, 330, { rpe }), run(at(w, 5), 8, 340, { rpe }), gym(at(w, 1)), gym(at(w, 4)));
+        return out;
+    };
+    const report = (sessions, extra = {}) => WR.build(Object.assign({ sessions, start }, extra));
+
+    assert(new Date(WR.monday(at(0, 6, 23))).getDay() === 1 && WR.monday(at(0, 6, 23)) === start, "Week: Sunday night belongs to the Monday before");
+    const spring = new Date(2026, 2, 23).getTime();
+    assert(new Date(WR.addWeeks(spring, 1)).getHours() === 0, "Week: a clock change doesn't move Monday");
+
+    // Empty, light and paused weeks
+    assert(report([]).light && /Nothing logged/.test(report([]).line), "Nothing logged: a line, no comparison");
+    let r = report([...usualWeeks(-5, -1), run(at(0, 1))]);
+    assert(r.light && /A light week/.test(r.line) && !r.rows, "One day logged: a light week, no comparison");
+    r = report([...usualWeeks(-5, -1), ...usualWeeks(0, 0)], { paused: new Set([start]) });
+    assert(r.light && /Left out/.test(r.line), "A paused week is left out");
+    const pausedBefore = report([...usualWeeks(-4, -2), run(at(-1, 0), 30, 330, { rpe: 3 }), run(at(-1, 3), 30, 330, { rpe: 3 }), ...usualWeeks(0, 0)], { paused: new Set([WR.addWeeks(start, -1)]) });
+    assert(pausedBefore.rows[0].close, "A paused week doesn't count towards your usual");
+
+    // The usual week says little
+    const quiet = [...usualWeeks(-6, 0)];
+    r = report(quiet);
+    assert(r.rows.every(x => x.close || x.usual === "0"), "A usual week reads about the same");
+    assert(r.observation === null, "A usual week has nothing to notice");
+    assert(r.line.startsWith("3 runs, 2 strength days."), `Summary counts the week (${r.line})`);
+    assert(r.active.active === 7 && r.active.counted === 8, "Consistency: active weeks of the last 8, not a streak");
+    assert(r.longest.km === 8 && Math.abs(r.longest.top - 8.8) < 1e-9, "Next week: the top of your usual range");
+
+    // Nothing after the week is looked at
+    const later = report([...quiet, run(at(1, 0), 30)]);
+    assert(later.longest.km === 8, "A report only knows what happened up to its end");
+
+    // Current week is never part of its own usual
+    const big = report([...usualWeeks(-5, -1), run(at(0, 0), 8, 340, { rpe: 3 }), run(at(0, 2), 8, 340, { rpe: 3 }), run(at(0, 4), 8, 340, { rpe: 3 }), gym(at(0, 1)), gym(at(0, 3))]);
+    assert(big.observation && big.observation.rule === "load" && /above your usual/.test(big.observation.text), "A much bigger week is stated");
+    assert(!big.observation.next, "Stated, with no instruction unless you felt tired");
+
+    // Load: ratings, or minutes without them
+    const unrated = usualWeeks(-5, 0).map(s => { const c = Object.assign({}, s); delete c.rpe; return c; });
+    assert(report(unrated).rows[1].label === "Run minutes", "Without ratings, minutes stand in for load");
+    assert(report(quiet).rows[1].label === "Run load", "With ratings, load is how hard x how long");
+    assert(WR.load({ rpe: 5, time: 1800 }) === 150, "Load: RPE x minutes");
+
+    // The long run
+    const stretch = [...usualWeeks(-5, -1), run(at(0, 0), 5, 330, { rpe: 3 }), gym(at(0, 1)), gym(at(0, 3)), run(at(0, 6), 10, 340, { rpe: 3 })];
+    r = report(stretch);
+    assert(r.observation.rule === "long-run" && /longest in 30 days, by 25%/.test(r.observation.text), `Long run past 1.1x the last 30 days (${r.observation.text})`);
+    assert(/Most runs like this are fine/.test(r.observation.text) && !/risk/i.test(r.observation.text), "Worded without alarm");
+    const shortRuns = (t) => run(t, 3, 330, { rpe: 3 });
+    const shortWeeks = []; for (let i = -5; i <= -1; i++) shortWeeks.push(shortRuns(at(i, 0)), shortRuns(at(i, 3)), gym(at(i, 1)), gym(at(i, 4)));
+    const little = report([...shortWeeks, shortRuns(at(0, 0)), run(at(0, 3), 3.4, 330, { rpe: 3 }), gym(at(0, 1)), gym(at(0, 4))]);
+    assert(little.observation === null, "13% longer but under half a km: not worth a mention");
+    const jump = report([...usualWeeks(-5, -1), run(at(0, 0), 5), gym(at(0, 1)), gym(at(0, 3)), run(at(0, 6), 18, 340)]);
+    assert(/big jump/.test(jump.observation.text), "More than double is a big jump");
+    assert(report([run(at(-9, 0), 3), gym(at(0, 0)), run(at(0, 2), 10)]).observation.rule !== "long-run", "Nothing in the last 30 days: not a spike");
+    const walkOnly = [...usualWeeks(-5, 0), walk(at(0, 6), 200)];
+    assert(report(walkOnly).observation === null, "A long walk isn't a long run");
+
+    // Pain comes first, and only if it's there
+    const note = (text) => report([...stretch.slice(0, -1), run(at(0, 6), 10, 340, { rpe: 3, note: text })]);
+    assert(note("left calf sore from km 3").observation.rule === "pain", "A sore calf in your notes comes first");
+    assert(note("no pain at all, felt great").observation.rule === "long-run", "\"No pain\" isn't pain");
+
+    // Resting heart rate
+    const days = (n, bpm, end = at(1, 0, 0)) => Array.from({ length: n }, (_, i) => [end - (i + 0.5) * 86400000, typeof bpm === "function" ? bpm(i) : bpm]);
+    const end = at(1, 0, 0);
+    let rhr = WR.restingHeartRate([...days(7, 62), ...days(28, 55, end - 7 * 86400000)], end);
+    assert(rhr.known && rhr.rise && rhr.shift === 7, "Resting HR: an unusual rise, against the 4 weeks before");
+    rhr = WR.restingHeartRate([...days(7, 58), ...days(28, 55, end - 7 * 86400000)], end);
+    assert(rhr.known && !rhr.rise && rhr.shift === 3, "Resting HR: a small shift isn't a rise");
+    rhr = WR.restingHeartRate(days(10, 55), end);
+    assert(!rhr.known, "Resting HR: no verdict without a baseline");
+    const health = (week, base) => ({ sleep: [], resting: [...days(7, week), ...days(28, base, end - 7 * 86400000)] });
+    r = report(quiet, { health: health(62, 55) });
+    assert(r.observation.rule === "rest-alone" && /may mean nothing/i.test(r.observation.text), "Resting HR alone stays unconfirmed");
+    const tired = quiet.map(s => s.startTime >= start ? Object.assign({}, s, { feel: "tired" }) : s);
+    assert(report(tired, { health: health(62, 55) }).observation.rule === "rest-and-feel", "Resting HR and how you feel together say more");
+    assert(!/illness/.test(report(quiet, { health: health(62, 55) }).observation.text), "Never a diagnosis from one signal");
+
+    // Sleep
+    const nights = (n, min, endAt = end) => Array.from({ length: n }, (_, i) => { const e = endAt - i * 86400000 - 3600000 * 12; return [e - min * 60000, e]; });
+    const s1 = WR.sleepSummary([...nights(7, 360), ...nights(28, 450, end - 7 * 86400000)], end);
+    assert(s1.known && s1.change === -90, "Sleep: the week's typical night against the 4 weeks before");
+    assert(!WR.sleepSummary(nights(4, 360), end).known, "Sleep: no verdict from a few nights");
+    r = report(quiet, { health: { resting: [], sleep: [...nights(7, 360), ...nights(28, 450, end - 7 * 86400000)] } });
+    assert(r.observation.rule === "sleep" && !/score|poor|bad/i.test(r.observation.text), "Short sleep is stated, never scored");
+
+    // Effort at the same pace
+    const paced = (t, pace, rpe) => run(t, 6, pace, { rpe });
+    const effortHistory = (bump) => {
+        const rand = seeded(7), out = [];
+        for (let w = -10; w <= 0; w++) [0, 2, 4].forEach(d => {
+            const pace = 300 + Math.round(rand() * 60);
+            const rpe = Math.round(4 + (330 - pace) / 12 + (w >= -1 ? bump : 0));
+            out.push(paced(at(w, d), pace, rpe));
+        });
+        return out;
+    };
+    const flat = WR.effortDrift(effortHistory(0), end);
+    assert(flat && Math.abs(flat.drift) < 1, `Effort: steady runs feel as their pace says (${flat && flat.drift.toFixed(2)})`);
+    const harder = WR.effortDrift(effortHistory(2), end);
+    assert(harder && harder.drift >= 1.8, `Effort: two weeks feeling harder shows in full, not diluted by being its own baseline (${harder && harder.drift.toFixed(2)})`);
+    const noSense = []; { const rnd = seeded(3); for (let i = -10; i <= 0; i++) [0, 2, 4].forEach(d => { const pace = 300 + Math.round(rnd() * 60); noSense.push(paced(at(i, d), pace, Math.round(3 + (pace - 300) / 15))); }); }
+    assert(WR.effortDrift(noSense, end) === null, "Effort: if quicker doesn't feel harder, it says nothing");
+    assert(WR.effortDrift(effortHistory(0).slice(-5), end) === null, "Effort: no verdict without a history");
+    const gyms = []; for (let w = -10; w <= 0; w++) gyms.push(gym(at(w, 1)), gym(at(w, 3)));
+    assert(report([...effortHistory(2), ...gyms]).observation.rule === "effort", "Effort feeling harder is noticed");
+    assert(WR.steady(run(at(0, 0), 6, 330, { guided: {} })) === false, "An interval session isn't a steady run");
+    assert(WR.steady(run(at(0, 0), 2, 330)) === false, "Nor is a short one");
+
+    // Strength
+    let w = report([...usualWeeks(-5, -1), run(at(0, 0)), run(at(0, 2)), run(at(0, 5), 8, 340), gym(at(0, 1))]);
+    assert(w.observation.rule === "strength" && /One strength day/.test(w.observation.text), "Under two strength days is noticed");
+    assert(report(usualWeeks(-5, 0).filter(s => s.activity !== "strength")).observation === null, "No nagging if you've never done strength");
+    const moved = [{ id: "push", name: "Push-ups", variation: "Diamond push-up", level: 4, levels: 6, sets: [{ reps: 6, target: 6 }] }];
+    w = report([...usualWeeks(-5, -1), run(at(0, 0)), run(at(0, 2)), gym(at(0, 1), moved), gym(at(0, 3), moved)]);
+    assert(/moved up to Diamond push-up/.test(w.wentWell), "Fewer reps on a harder step reads as progress");
+    const dropped = (t) => gym(t, [{ id: "squat", name: "Squats", variation: "Squat", level: 1, levels: 6, sets: [{ reps: 8, target: 8 }] }]);
+    const noPush = [...usualWeeks(-8, -4), ...[-3, -2, -1, 0].flatMap(x => [run(at(x, 0)), run(at(x, 2)), run(at(x, 5), 8, 340), dropped(at(x, 1)), dropped(at(x, 4))])];
+    assert(report(noPush).observation.rule === "pattern" && /pushing/.test(report(noPush).observation.text), "A movement dropped for three weeks is noticed");
+    const noPull = report(quiet);
+    assert(noPull.observation === null, "A movement you never did isn't nagged about (no pull-up bar)");
+
+    // Walks
+    const steps = []; for (let m = 0; m <= 20; m++) steps.push([m * 60000, m * (m < 10 ? 110 : 80)]);
+    assert(WR.briskMinutes({ steps: steps.map((p, i) => [p[0], i <= 10 ? i * 110 : 1100 + (i - 10) * 80]) }) === 10, "Walks: brisk minutes at 100 steps a minute");
+    assert(WR.briskMinutes({}) === 0, "Walks: none without a step counter");
+
+    // Heart rate from a wrist
+    const hrRun = (samples) => run(at(0, 0), 6, 300, { hr: { samples } });
+    const full = []; for (let t = 0; t < 1800000; t += 60000) full.push([t, 150]);
+    assert(WR.cleanHeartRate(hrRun(full), 55) === 150, "HR: covered runs give a value");
+    assert(WR.cleanHeartRate(hrRun(full.slice(0, 5)), 55) === null, "HR: sparse runs give none, not a guess");
+    assert(WR.cleanHeartRate(hrRun(full.map(s => [s[0], 62])), 55) === null, "HR: readings near resting aren't a run");
+
+    // Language follows the noise
+    assert(WR.tier(0.01, 12, 12, 0.05) === 0, "1% between 4-week blocks: no clear change");
+    assert(WR.tier(0.04, 12, 12, 0.05) === 1 && WR.tier(0.06, 12, 12, 0.05) === 2, "Bigger changes earn surer words");
+
+    // Only every fourth report judges fitness
+    const blocks = []; for (let i = 0; i < 8; i++) blocks.push(WR.isBlockWeek(WR.addWeeks(start, i)));
+    assert(blocks.filter(Boolean).length === 2, "A block review every fourth week");
+    const reviewWeek = WR.addWeeks(start, blocks.indexOf(true));
+    const rv = WR.build({ sessions: [...usualWeeks(-9, 3)], start: reviewWeek });
+    assert(rv.review && /No clear change/.test(rv.review[0].text), "Even pace for 8 weeks: no clear change");
+    assert(/step 4 of 6/.test(rv.review.map(x => x.text).join()), "The review shows where you are on the ladder");
+    assert(!report(quiet).review === !WR.isBlockWeek(start), "Other weeks don't judge fitness");
+    const words = JSON.stringify([rv, report(stretch), report(quiet, { health: health(62, 55) })]);
+    assert(!/readiness|injury risk|failed|you should|vo2/i.test(words.replace(/overuse injury/g, "")), "No scores, verdicts or \"should\"");
+
+    // Backtest: a stable athlete, with ordinary noise, a year of weeks
+    const rand = seeded(42), year = [];
+    for (let i = -60; i <= 0; i++) {
+        const noisy = (x, by) => x * (1 + (rand() - 0.5) * 2 * by);
+        [0, 2, 5].forEach((d, n) => {
+            const km = noisy(n === 2 ? 8 : 5, 0.05), pace = noisy(330, 0.05);
+            year.push(run(at(i, d), km, pace, { rpe: Math.max(1, Math.round(3 + (330 - pace) / 15 + (rand() - 0.5) * 2)) }));
+        });
+        year.push(gym(at(i, 1)), gym(at(i, 4)));
+    }
+    let fired = 0, weeks = 0;
+    for (let i = -40; i <= 0; i++) { weeks++; if (WR.build({ sessions: year, start: WR.addWeeks(start, i) }).observation) fired++; }
+    assert(fired / weeks <= 0.15, `Backtest: a stable athlete isn't told something most weeks (${fired} of ${weeks})`);
+})();
+
 // ─── Gym and walks ───────────────────────────────────────────────────────────
 
 console.log("\n=== Strength Planner Tests ===\n");
@@ -1127,7 +1336,9 @@ function gym(day, weight, target, done, ex = benchEx) {
     const p = SP.progress([gym(1, 60, 8, [8, 8, 8]), gym(2, 70, 8, [8, 8, 7])]);
     assert(p.length === 1 && p[0].sessions === 2 && p[0].weight === 70 && p[0].reps === 8 && p[0].change > 0, "Progress: latest lift and gain per exercise");
     const c = SP.custom("  Cable Fly! ", { weights: true });
-    assert(c.id === "cable-fly" && c.name === "Cable Fly!" && c.stepKg === 2.5, "Your own exercise with weights");
+    assert(c.id === "custom-cable-fly" && c.name === "Cable Fly!" && c.stepKg === 2.5, "Your own exercise with weights");
+    assert(SP.custom("Plank").id !== "plank", "Your own Plank doesn't share history with the preset");
+    assert(SP.custom("पुश अप").id.length > "custom-".length, "A name in another script still gets an id");
     const own = SP.custom("Bear crawl");
     assert(own.stepKg === 0 && !own.ladder && !own.unit && SP.target(own, []).weight === 0, "Your own exercise is bodyweight by default");
     const ownHold = SP.custom("Dead hang", { timed: true });
@@ -1191,6 +1402,19 @@ function gym(day, weight, target, done, ex = benchEx) {
     assert(chosen.variation === "Knee push-up" && chosen.reps === 6 && chosen.why === "", "Easier: one rung down");
     assert(SP.change(push, { level: 5 }, 1) === null && SP.change(push, { level: 0 }, -1) === null, "No rung past either end");
     assert(SP.change(SP.custom("Bear crawl"), { level: 0 }, 1) === null, "No ladder, nothing to change");
+
+    // Stopping early isn't failing
+    const pushEx = SP.PRESETS.find(p => p.id === "push");
+    const bw = (day, reps, target = 8) => ({ activity: "strength", startTime: day * 86400000, endTime: day * 86400000 + 1,
+        exercises: [{ id: "push", level: 3, sets: reps.map(r => ({ weight: 0, reps: r, target })) }] });
+    t = SP.target(pushEx, [bw(1, [8])]);
+    assert(t.action === "hold" && t.reps === 8 && t.level === 3, "One set on target, then skipped: same again, no step up");
+    t = SP.target(pushEx, [bw(1, [8]), bw(2, [8]), bw(3, [8, 8])]);
+    assert(t.action === "hold" && t.reps === 8, "Skipping again and again never eases the plan");
+    t = SP.target(pushEx, [bw(1, [5, 5, 5]), bw(2, [8]), bw(3, [5, 5, 5])]);
+    assert(t.action === "back", "Real misses still count across a session you cut short");
+    t = SP.target(Object.assign({}, pushEx, { sets: 4 }), [bw(1, [8, 8, 8])]);
+    assert(t.action === "hold" && t.reps === 8, "Adding a set: the first go at it isn't held against you");
     const later = SP.target(push, [on(1, chosen.level, 6, [7, 7, 7])]);
     assert(later.variation === "Knee push-up" && later.reps === 8, "Your choice is remembered next time");
 
@@ -1260,10 +1484,12 @@ function fakeServer({ refuseOlder = false } = {}) {
             if (srv.failAfterPosts != null && srv.posts.length >= srv.failAfterPosts) return reply(500, { message: "down" });
             const body = JSON.parse(options.body);
             srv.posts.push(body.map(r => r[col]));
+            // One statement, one now(): rows written together share updated_at
+            const at = new Date(++srv.clock * 1000).toISOString();
             body.forEach(r => {
                 const had = rows.get(String(r[col]));
                 if (refuseOlder && had && r.client_updated_at < had.client_updated_at) return;
-                rows.set(String(r[col]), Object.assign({}, r, { updated_at: new Date(++srv.clock * 1000).toISOString() }));
+                rows.set(String(r[col]), Object.assign({}, r, { updated_at: at }));
             });
             return reply(201, null);
         }
@@ -1273,8 +1499,9 @@ function fakeServer({ refuseOlder = false } = {}) {
             const ids = inList.slice(4, -1).split(",").map(x => x.replace(/"/g, ""));
             return reply(200, all.filter(r => ids.includes(String(r[col]))).map(r => ({ data: r.data })));
         }
-        const since = (u.searchParams.get("updated_at") || "").replace("gt.", "");
-        return reply(200, all.filter(r => !since || r.updated_at > since)
+        const [, op, since] = /^(gte?)\.(.*)$/.exec(u.searchParams.get("updated_at") || "") || [];
+        return reply(200, all.filter(r => !since || (op === "gte" ? r.updated_at >= since : r.updated_at > since))
+            .slice(0, Number(u.searchParams.get("limit")) || undefined)
             .map(r => ({ [col]: r[col], client_updated_at: r.client_updated_at, updated_at: r.updated_at })));
     };
     return srv;
@@ -1465,6 +1692,35 @@ async function testSync() {
     srv.posts.length = 0;
     res = await CloudSync.sync();
     assert(res.pushed === 7 && !srv.posts.flat().includes(T) && srv.runs.size === 12, "Next sync carries on from there");
+
+    // A big account: a page of the list can end between rows written together
+    const bigSrv = fakeServer();
+    for (let i = 0; i < 101; i++) {
+        const at = new Date(++bigSrv.clock * 1000).toISOString();
+        for (let j = 0; j < 5; j++) {
+            const id = `p${i}-${j}`;
+            bigSrv.course_progress.set(id, { progress_id: id, data: { progressId: id, updatedAt: 1000 }, client_updated_at: 1000, updated_at: at });
+        }
+    }
+    // Shifted by three, so the page of 500 doesn't end on a chunk's edge
+    ["a", "b", "c"].forEach(id => bigSrv.course_progress.set(id, { progress_id: id, data: { progressId: id, updatedAt: 1000 }, client_updated_at: 1000, updated_at: new Date(0).toISOString() }));
+    const big = await phone(bigSrv);
+    await CloudSync.sync();
+    const bigGot = await new Promise(r => { Store.database().transaction(["courseProgress"]).objectStore("courseProgress").count().onsuccess = e => r(e.target.result); });
+    assert(bigGot === 508, `Sync: a page ending between rows written together loses none of them (${bigGot} of 508)`);
+
+    // A download that stalls halfway must not hang this sync and every one after it
+    const stalled = fakeServer();
+    await phone(stalled);
+    const realTimeout = global.setTimeout;
+    global.setTimeout = (fn, ms, ...rest) => realTimeout(fn, ms >= 60000 ? 5 : ms, ...rest);
+    global.fetch = async (url, options) => ({
+        ok: true, status: 200,
+        text: () => new Promise((_, reject) => options.signal.addEventListener("abort", () => reject(Object.assign(new Error("gone"), { name: "AbortError" })))),
+    });
+    const stalledResult = await Promise.race([CloudSync.sync(), new Promise(r => realTimeout(() => r("hung"), 1000))]);
+    global.setTimeout = realTimeout;
+    assert(stalledResult === null && JSON.parse(localStorage.getItem("cloudSync")).lastError === "Timed out", "Sync: a stalled download times out and is reported");
 
     // Gym sessions and walks travel like runs
     srv = fakeServer();

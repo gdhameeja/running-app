@@ -65,6 +65,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Spoken rest timers during a gym workout" />
         </service>
+        <!-- The Monday "your week is ready" notification -->
+        <receiver
+            android:name=".tracking.WeeklyReportReceiver"
+            android:exported="false" />
     </application>
 
     <!-- Permissions -->

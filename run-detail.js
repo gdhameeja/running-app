@@ -68,6 +68,7 @@ const RunDetail = (() => {
 
     function render(run, runs) {
         if (run.activity === "strength") return renderStrength(run, runs);
+        const noun = run.activity === "walk" ? "walk" : "run";
         const series = RunAnalysis.seriesForRun(run);
         const hasTrack = !!(run.track && run.track.length > 1);
         const stops = hasTrack ? RunAnalysis.findStops(run.track) : [];
@@ -102,16 +103,16 @@ const RunDetail = (() => {
                 <div id="rd-splits"></div>
                 ${hasTrack ? `<h3>Stops</h3><div id="rd-stops"></div>` : ""}
                 ${hasTrack ? "" : `<p class="gr-note">Runs recorded before this version only have 100 m splits: no pace colours, stops or smooth replay.</p>`}
-                <h3>Fix this run</h3>
+                <h3>Fix this ${noun}</h3>
                 <div id="rd-edit">
                     ${hasTrack ? `<button class="btn-small" id="rd-trim"><span class="material-icons">content_cut</span> Trim the end</button>
                     <div id="rd-trim-box" style="display:none;">
-                        <p class="gr-note">Forgot to stop, or got a lift home? Drag to where the run really ended. Everything after it is removed for good.</p>
+                        <p class="gr-note">Forgot to stop, or got a lift home? Drag to where the ${noun} really ended. Everything after it is removed for good.</p>
                         <input type="range" id="rd-trim-at" min="0" max="1000" value="1000">
                         <div class="rd-readout" id="rd-trim-readout"></div>
                         <div class="sp-row"><button class="btn-small" id="rd-trim-save" disabled>Save</button><button class="btn-small" id="rd-trim-cancel">Cancel</button></div>
                     </div>` : ""}
-                    <button class="btn-small btn-danger" id="rd-delete"><span class="material-icons">delete</span> Delete run</button>
+                    <button class="btn-small btn-danger" id="rd-delete"><span class="material-icons">delete</span> Delete ${noun}</button>
                 </div>
             </div>`;
         el.style.display = "flex";
@@ -167,7 +168,7 @@ const RunDetail = (() => {
             .then(() => closeThen(() => {
                 if (summaryRunId === run.runId) closeRunScreen();
                 refreshLists();
-                showToast("Run deleted.", 2000);
+                showToast("Deleted.", 2000);
             }))
             .catch(err => alert("Couldn't delete that run: " + (err && err.message || err)));
     }
@@ -205,7 +206,7 @@ const RunDetail = (() => {
             const preview = RunAnalysis.trimRun(run, keepMs);
             if (!preview) return;
             const cut = ((run.distance - preview.distance) / 1000).toFixed(2);
-            if (!confirm(`Remove the last ${cut} km of this run? This can't be undone.`)) return;
+            if (!confirm(`Remove the last ${cut} km? This can't be undone.`)) return;
             save.disabled = true;
             // From the stored run: an effort rating or note may have changed since this page opened
             let trimmed = null;
@@ -221,7 +222,7 @@ const RunDetail = (() => {
                 if (map) { map.remove(); map = null; }
                 current = trimmed;
                 render(trimmed, runs.map(r => r.runId === trimmed.runId ? trimmed : r));
-                showToast("Run trimmed.", 2000);
+                showToast("Trimmed.", 2000);
             }).catch(err => alert("Couldn't save that: " + (err && err.message || err)));
         });
     }
@@ -393,7 +394,7 @@ const RunDetail = (() => {
             <div class="rpe-q">How hard was that?</div>
             <div class="rpe-row">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n =>
                 `<button class="rpe-btn${run.rpe === n ? " on" : ""}" data-rpe="${n}">${n}</button>`).join("")}</div>
-            <div class="rpe-scale"><span>very easy</span><span>max effort</span></div>
+            <div class="rpe-scale"><span>1 very easy</span><span>3 moderate</span><span>5 hard</span><span>7 very hard</span><span>10 max</span></div>
             <textarea class="rpe-note" rows="2" placeholder="Notes: legs, sleep, shoes, how it felt…">${escapeHtml(run.note || "")}</textarea>
         </div>`;
     }
@@ -562,7 +563,7 @@ const RunDetail = (() => {
     function bindRpe(container) {
         container.querySelectorAll(".rpe-box").forEach(box => {
             const id = Number(box.dataset.run);
-            const save = (patch) => patchRun(id, patch);
+            const save = (patch) => patchRun(id, patch).then(run => { CloudSync.soon(); return run; });
             box.querySelectorAll(".rpe-btn").forEach(b => b.addEventListener("click", () => {
                 box.querySelectorAll(".rpe-btn").forEach(x => x.classList.toggle("on", x === b));
                 save({ rpe: Number(b.dataset.rpe) }).then(() => showToast("Saved. Thanks!", 1200));

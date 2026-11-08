@@ -16,6 +16,8 @@ const CloudSync = (() => {
     const PUSH_CHUNK = 5;
     const FETCH_CHUNK = 10;
     const LIST_PAGE = 500;
+    // A chunk of runs with their GPS data takes a while on mobile data
+    const DATA_TIMEOUT_MS = 120000;
     const EXPORT_PIECE = 1 << 20;
     // Runs sync as soon as they're saved; otherwise (offline then, or changes
     // from another phone) a catch-up sync at most this often
@@ -44,9 +46,13 @@ const CloudSync = (() => {
     function request(url, options = {}, timeoutMs = 30000) {
         const ctl = new AbortController();
         const timer = setTimeout(() => ctl.abort(), timeoutMs);
-        return fetch(url, Object.assign({ signal: ctl.signal }, options)).then(res => {
-            clearTimeout(timer);
-            return res.text().then(text => {
+        // The timer runs until the body is in: a stalled download would otherwise
+        // hang here, and hold up every sync after it, until the app restarts
+        return fetch(url, Object.assign({ signal: ctl.signal }, options))
+            .then(res => res.text().then(text => ({ res, text })))
+            .catch(err => { throw new Error(err.name === "AbortError" ? "Timed out" : "No connection"); })
+            .finally(() => clearTimeout(timer))
+            .then(({ res, text }) => {
                 let body = null;
                 try { body = text ? JSON.parse(text) : null; } catch (e) { body = text; }
                 if (!res.ok) {
@@ -55,10 +61,6 @@ const CloudSync = (() => {
                 }
                 return body;
             });
-        }, err => {
-            clearTimeout(timer);
-            throw new Error(err.name === "AbortError" ? "Timed out" : "No connection");
-        });
     }
 
     function authCall(path, body) {
@@ -101,7 +103,7 @@ const CloudSync = (() => {
             const c = cfg();
             return request(`${c.url}/rest/v1/${path}`, Object.assign({}, options, {
                 headers: Object.assign({ apikey: c.key, Authorization: `Bearer ${s.access}`, "Content-Type": "application/json" }, options.headers),
-            }));
+            }), DATA_TIMEOUT_MS);
         });
     }
 
@@ -230,7 +232,9 @@ const CloudSync = (() => {
         let newest = 0;
         const page = () => {
             const since = cfg()[watermarkKey];
-            const filter = since ? `&updated_at=gt.${encodeURIComponent(since)}` : "";
+            // At or after: rows written together share a time, and a page can end
+            // between them. The ones seen already aren't downloaded again.
+            const filter = since ? `&updated_at=gte.${encodeURIComponent(since)}` : "";
             return rest(`${table}?select=${t.column},client_updated_at,updated_at${filter}&order=updated_at.asc&limit=${LIST_PAGE}`).then(rows => {
                 if (!rows.length) return { got, newest };
                 return t.list().then(local => {
@@ -509,7 +513,8 @@ const CloudSync = (() => {
         $("sp-file").addEventListener("change", e => {
             const file = e.target.files[0];
             if (!file) return;
-            file.text().then(importJson).then(msg => showToast(msg, 4000)).catch(err => showToast(`Import failed: ${err.message}`, 4000));
+            file.text().then(importJson).then(msg => showToast(msg, 4000)).catch(err => showToast(`Import failed: ${err.message}`, 4000))
+                .finally(() => { e.target.value = ""; }); // or choosing the same file again does nothing
         });
         if ($("sp-health")) $("sp-health").addEventListener("click", e => withBusy(e.target, () => Enrich.connectHealth().then(h => {
             if (h.granted) showToast("Connected. Heart rate will be added to your runs.", 3000);

@@ -114,6 +114,15 @@ class WorkoutService : Service() {
         main.postDelayed(stop, DRAIN_MS)
     }
 
+    /**
+     * Swiped away mid-workout: nothing will send the next cues, so say what's left and
+     * stop, rather than sit there with a wake lock and a notification that can't be
+     * dismissed. Coming back in time cancels this, as schedule() clears the queue.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        main.postDelayed({ finish() }, maxOf(0L, endsAt - System.currentTimeMillis()) + 1000L)
+    }
+
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
         wakeLock?.let { if (it.isHeld) it.release() }

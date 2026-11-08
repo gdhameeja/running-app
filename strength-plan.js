@@ -4,6 +4,7 @@
 //  - Most exercises are a ladder of harder variations, which do the job added
 //    weight does in a gym. Hit every set: more reps (or seconds) next time. Hit
 //    the top of the range: on to the next variation, at the bottom of the range.
+//  - Stopped early with every set on target: same again, neither hit nor miss.
 //  - Missed: same target again. Missed twice: fewer reps, or the variation below
 //    if you were already at the bottom of the range.
 //  - Tired today: repeat what you did rather than stepping up.
@@ -51,14 +52,27 @@ const StrengthPlanner = (() => {
         { id: "b", title: "Home B", exercises: ["packrow", "back", "bridge", "sideplank"].map(byId) },
     ];
 
+    // For the weekly report: which movement each exercise trains
+    const PATTERN_NAMES = { push: "pushing", legs: "legs", hinge: "your back and hips", core: "your core", pull: "pulling" };
+    const PATTERNS = {
+        push: "push", dip: "push", bench: "push", ohp: "push",
+        squat: "legs", calf: "legs", barsquat: "legs",
+        back: "hinge", bridge: "hinge", deadlift: "hinge",
+        plank: "core", sideplank: "core", hollow: "core", legraise: "core",
+        packrow: "pull", row: "pull", pull: "pull", barrow: "pull", curl: "pull",
+    };
+    const patternOf = (id) => PATTERNS[id] || "other";
+
     const slug = (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
     // Your own exercise: bodyweight reps unless you say otherwise
     function custom(name, { weights = false, timed = false } = {}) {
         const title = name.trim();
-        if (timed) return Object.assign(hold(slug(title), title, null, 0), { ladder: undefined });
-        if (weights) return lift(slug(title), title, 2.5, 90);
-        return Object.assign(ladder(slug(title), title, null, 0, NO_EQUIPMENT, 8, 15), { ladder: undefined });
+        // Its own id, so a "Plank" of yours doesn't share history with the preset
+        const id = `custom-${slug(title) || Date.now()}`;
+        if (timed) return Object.assign(hold(id, title, null, 0), { ladder: undefined });
+        if (weights) return lift(id, title, 2.5, 90);
+        return Object.assign(ladder(id, title, null, 0, NO_EQUIPMENT, 8, 15), { ladder: undefined });
     }
 
     function roundTo(weight, step) {
@@ -80,6 +94,9 @@ const StrengthPlanner = (() => {
     function hit(entry, ex) {
         return entry.sets.length >= ex.sets && entry.sets.every(s => s.reps >= s.target);
     }
+
+    // Every set you did reached its target, even if you skipped the rest
+    const clean = (entry) => entry.sets.every(s => s.reps >= s.target);
 
     const variationAt = (ex, level) => ex.ladder ? ex.ladder[Math.max(0, Math.min(level, ex.ladder.length - 1))] : null;
 
@@ -115,11 +132,13 @@ const StrengthPlanner = (() => {
             const capped = ex.stepKg > 0 || (onLadder && level < ex.ladder.length - 1) ? Math.min(more, ex.repHigh) : more;
             return out(weight, capped, level, "rep", `Hit it last time: ${capped - reps} more ${capped - reps === 1 ? word.slice(0, -1) : word}`);
         }
+        // Short of time isn't short of strength: no step up, but no step back either
+        if (clean(last)) return out(weight, reps, level, "hold", "Not all sets last time: same again");
         // Misses in a row at this weight and variation
         let misses = 0;
         for (const e of past) {
             if (hit(e, ex) || topWeight(e) !== weight || (e.level != null && e.level !== last.level)) break;
-            misses++;
+            if (!clean(e)) misses++;
         }
         if (misses < 2) return out(weight, reps, level, "hold", "Just missed last time: same again");
         if (ex.stepKg > 0) return out(roundTo(weight * BACK_OFF, ex.stepKg), ex.repLow, level, "back", "Missed twice: easing off to build back up");
@@ -206,7 +225,7 @@ const StrengthPlanner = (() => {
         return (session.exercises || []).filter(e => e.unit === "s").reduce((sum, e) => sum + e.sets.reduce((a, s) => a + s.reps, 0), 0);
     }
 
-    return { PRESETS, GROUPS, DEFAULT_ROUTINES, custom, target, change, spokenSet, restCues, holdCues, after, oneRepMax, volume, totalReps, totalHeld, progress };
+    return { PRESETS, GROUPS, DEFAULT_ROUTINES, PATTERN_NAMES, patternOf, custom, target, change, spokenSet, restCues, holdCues, after, oneRepMax, volume, totalReps, totalHeld, progress };
 })();
 
 if (typeof module !== "undefined") module.exports = StrengthPlanner;

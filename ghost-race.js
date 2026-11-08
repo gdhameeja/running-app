@@ -63,7 +63,7 @@ const routeSignatureCache = new Map();
 // A route's name is kept on its oldest run (whose id is the route's id), so it
 // goes to the cloud and into backups with the run.
 function saveRouteName(id, name) {
-    return patchRun(id, { routeName: name || undefined });
+    return patchRun(id, { routeName: name || undefined }).then(run => { CloudSync.soon(); return run; });
 }
 
 // Names used to live in localStorage: move them onto their runs, once
