@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Run Tracker launcher icon: a happy little running shoe. Generated together with icon.svg. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:translateX="9.3" android:translateY="5.8" android:scaleX="0.86" android:scaleY="0.86">
+        <path android:pathData="M31,76.5a26,2.6 0 1,0 52,0a26,2.6 0 1,0 -52,0Z" android:fillColor="#000000" android:fillAlpha="0.16" />
+        <path android:pathData="M18.5,49L25,49" android:strokeColor="#C5CAE9" android:strokeWidth="3.2" android:strokeLineCap="round" android:strokeAlpha="1" />
+        <path android:pathData="M16,56L24.5,56" android:strokeColor="#FFFFFF" android:strokeWidth="3.2" android:strokeLineCap="round" android:strokeAlpha="1" />
+        <path android:pathData="M18.5,63L25,63" android:strokeColor="#C5CAE9" android:strokeWidth="3.2" android:strokeLineCap="round" android:strokeAlpha="1" />
+        <path android:pathData="M33,37.5L45,37.5Q48,37.5 48,40.5L48,42L30,42L30,40.5Q30,37.5 33,37.5Z" android:fillColor="#E84F5E" android:fillAlpha="1" />
+        <path android:pathData="M30,64L30,46Q30,40 36,40L45,40Q50,40 51,44Q53,50 60,52L72,55Q83,58 83,64Z" android:fillColor="#FF6B6B" android:fillAlpha="1" />
+        <path android:pathData="M27,63L84,63Q87,63 87,66.5Q87,73 80,73L33,73Q27,73 27,67Z" android:fillColor="#FFFFFF" android:fillAlpha="1" />
+        <path android:pathData="M30,70.2L84,70.2Q83,73 80,73L33,73Q30.5,73 29.4,71Z" android:fillColor="#C5CAE9" android:fillAlpha="1" />
+        <path android:pathData="M55.5,45.5L58.5,49.5" android:strokeColor="#FFFFFF" android:strokeWidth="2.2" android:strokeLineCap="round" android:strokeAlpha="1" />
+        <path android:pathData="M60.5,47.5L62.8,51.6" android:strokeColor="#FFFFFF" android:strokeWidth="2.2" android:strokeLineCap="round" android:strokeAlpha="1" />
+        <path android:pathData="M65.5,49.3L67,53.2" android:strokeColor="#FFFFFF" android:strokeWidth="2.2" android:strokeLineCap="round" android:strokeAlpha="1" />
+        <path android:pathData="M33.5,58a2.7,1.7 0 1,0 5.4,0a2.7,1.7 0 1,0 -5.4,0Z" android:fillColor="#FF3D7F" android:fillAlpha="0.45" />
+        <path android:pathData="M52.099999999999994,58a2.7,1.7 0 1,0 5.4,0a2.7,1.7 0 1,0 -5.4,0Z" android:fillColor="#FF3D7F" android:fillAlpha="0.45" />
+        <path android:pathData="M37.8,53.5a2.7,2.7 0 1,0 5.4,0a2.7,2.7 0 1,0 -5.4,0Z" android:fillColor="#2B2D42" android:fillAlpha="1" />
+        <path android:pathData="M47.8,53.5a2.7,2.7 0 1,0 5.4,0a2.7,2.7 0 1,0 -5.4,0Z" android:fillColor="#2B2D42" android:fillAlpha="1" />
+        <path android:pathData="M40.449999999999996,52.5a0.95,0.95 0 1,0 1.9,0a0.95,0.95 0 1,0 -1.9,0Z" android:fillColor="#FFFFFF" android:fillAlpha="1" />
+        <path android:pathData="M50.449999999999996,52.5a0.95,0.95 0 1,0 1.9,0a0.95,0.95 0 1,0 -1.9,0Z" android:fillColor="#FFFFFF" android:fillAlpha="1" />
+        <path android:pathData="M43.2,57.6Q45.5,60.6 47.8,57.6" android:strokeColor="#2B2D42" android:strokeWidth="1.6" android:strokeLineCap="round" android:strokeAlpha="1" />
+        <path android:pathData="M80,33L81.3,37.2L85.5,38.5L81.3,39.8L80,44L78.7,39.8L74.5,38.5L78.7,37.2Z" android:fillColor="#FFE082" android:fillAlpha="1" />
+    </group>
+</vector>
